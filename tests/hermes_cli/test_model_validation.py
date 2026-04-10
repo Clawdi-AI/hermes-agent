@@ -198,6 +198,29 @@ class TestProviderModelIds:
         assert "copilot-acp" not in ids
 
 
+# -- validate_requested_model ------------------------------------------------
+
+class TestValidateRequestedModel:
+    def test_openai_codex_accepts_known_local_catalog_model_without_api_probe(self):
+        with patch(
+            "hermes_cli.models.fetch_api_models",
+            side_effect=AssertionError("should not probe"),
+        ):
+            result = validate_requested_model(
+                "gpt-5.4",
+                "openai-codex",
+                api_key="fake-oauth-jwt",
+                base_url="https://proxy.example/v1",
+            )
+
+        assert result == {
+            "accepted": True,
+            "persist": True,
+            "recognized": True,
+            "message": None,
+        }
+
+
 # -- fetch_api_models --------------------------------------------------------
 
 class TestFetchApiModels:
