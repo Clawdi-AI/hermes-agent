@@ -72,7 +72,10 @@ const PROVIDERS = [
 function readConfig(): Record<string, unknown> {
   try {
     const raw = fs.readFileSync(CONFIG_PATH, 'utf-8')
-    return (YAML.parse(raw) as Record<string, unknown>) || {}
+    const parsed = YAML.parse(raw) as unknown
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : {}
   } catch {
     return {}
   }
@@ -259,6 +262,10 @@ export const Route = createFileRoute('/api/hermes-config')({
             source: Record<string, unknown>,
           ) {
             for (const [key, value] of Object.entries(source)) {
+              if (value === null) {
+                delete target[key]
+                continue
+              }
               if (
                 value &&
                 typeof value === 'object' &&
@@ -276,13 +283,6 @@ export const Route = createFileRoute('/api/hermes-config')({
             }
           }
 
-          // Handle null values as explicit removals
-          for (const [key, value] of Object.entries(updates)) {
-            if (value === null) {
-              delete current[key]
-              delete updates[key]
-            }
-          }
           deepMerge(current, updates)
           writeConfig(current)
         }
@@ -290,11 +290,11 @@ export const Route = createFileRoute('/api/hermes-config')({
         // Handle env var updates
         if (body.env && typeof body.env === 'object') {
           const currentEnv = readEnv()
-          const envUpdates = body.env as Record<string, string>
+          const envUpdates = body.env as Record<string, unknown>
           for (const [key, value] of Object.entries(envUpdates)) {
             if (value === '' || value === null) {
               delete currentEnv[key]
-            } else {
+            } else if (typeof value === 'string') {
               currentEnv[key] = value
             }
           }

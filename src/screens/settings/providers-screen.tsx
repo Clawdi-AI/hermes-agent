@@ -435,7 +435,7 @@ function defaultFormatValue(
 function getDraftValue(
   setting: SettingDefinition,
   config: HermesConfig | undefined,
-  draftValues: Record<string, string>,
+  draftValues: Partial<Record<string, string>>,
 ): string {
   if (draftValues[setting.id] !== undefined) return draftValues[setting.id]
   if (!setting.path) return ''
@@ -527,8 +527,10 @@ function ProviderStatusBadge({ status }: { status: ProviderStatus }) {
 function SettingCard(props: {
   setting: SettingDefinition
   config: HermesConfig | undefined
-  draftValues: Record<string, string>
-  setDraftValues: React.Dispatch<React.SetStateAction<Record<string, string>>>
+  draftValues: Partial<Record<string, string>>
+  setDraftValues: React.Dispatch<
+    React.SetStateAction<Partial<Record<string, string>>>
+  >
   saveSetting: (payload: SaveSettingPayload) => Promise<void>
   isSaving: boolean
   savePath: string | null
@@ -747,12 +749,23 @@ function SettingCard(props: {
   )
 }
 
-type ModelProviderOption = 'custom' | 'openrouter' | 'anthropic' | 'openai'
+type ModelProviderOption =
+  | 'custom'
+  | 'openrouter'
+  | 'anthropic'
+  | 'openai'
+  | 'openai-codex'
+
+type AuthModeOption = '' | 'proxy'
 
 type ModelConfigDraft = {
   provider: ModelProviderOption
   model: string
   baseUrl: string
+  apiKey: string
+  authMode: AuthModeOption
+  headersText: string
+  userAgent: string
 }
 
 type PerformanceDraft = {
@@ -765,6 +778,7 @@ const MODEL_PROVIDER_OPTIONS: Array<SelectOption> = [
   { label: 'OpenRouter', value: 'openrouter' },
   { label: 'Anthropic', value: 'anthropic' },
   { label: 'OpenAI', value: 'openai' },
+  { label: 'OpenAI Codex', value: 'openai-codex' },
 ]
 
 const MODEL_PRESETS = [
@@ -794,11 +808,56 @@ function readRecord(value: unknown): Record<string, unknown> | undefined {
     : undefined
 }
 
+function readStringRecord(value: unknown): Record<string, string> | undefined {
+  const record = readRecord(value)
+  if (!record) return undefined
+
+  const entries = Object.entries(record).flatMap(([key, entry]) => {
+    if (typeof entry !== 'string') return []
+    return [[key, entry] as const]
+  })
+
+  return entries.length > 0 ? Object.fromEntries(entries) : undefined
+}
+
+function recordToLines(value?: Record<string, string>): string {
+  if (!value) return ''
+  return Object.entries(value)
+    .map(([key, entry]) => `${key}=${entry}`)
+    .join('\n')
+}
+
+function parseKeyValueLines(value: string): Record<string, string> | undefined {
+  const entries: Array<readonly [string, string]> = []
+  for (const rawLine of value.split('\n')) {
+    const line = rawLine.trim()
+    if (!line) continue
+
+    const separatorIndex = line.indexOf('=')
+    if (separatorIndex === -1) {
+      throw new Error('Headers must use key=value lines.')
+    }
+
+    const key = line.slice(0, separatorIndex).trim()
+    if (!key) {
+      throw new Error('Header names cannot be empty.')
+    }
+
+    entries.push([key, line.slice(separatorIndex + 1).trim()])
+  }
+
+  return entries.length > 0 ? Object.fromEntries(entries) : undefined
+}
+
 function parseModelProvider(value: unknown): ModelProviderOption {
   return typeof value === 'string' &&
     MODEL_PROVIDER_VALUES.has(value as ModelProviderOption)
     ? (value as ModelProviderOption)
     : 'custom'
+}
+
+function parseAuthMode(value: unknown): AuthModeOption {
+  return value === 'proxy' ? 'proxy' : ''
 }
 
 function readPrimaryModelConfig(
@@ -811,6 +870,12 @@ function readPrimaryModelConfig(
     provider: parseModelProvider(modelBlock?.provider ?? config?.provider),
     model: coerceString(modelBlock?.default ?? flatModel),
     baseUrl: coerceString(modelBlock?.base_url ?? config?.base_url),
+    apiKey: coerceString(modelBlock?.api_key ?? config?.api_key),
+    authMode: parseAuthMode(modelBlock?.auth_mode ?? config?.auth_mode),
+    headersText: recordToLines(
+      readStringRecord(modelBlock?.headers ?? config?.headers),
+    ),
+    userAgent: coerceString(modelBlock?.user_agent ?? config?.user_agent),
   }
 }
 
@@ -823,6 +888,10 @@ function readFallbackModelConfig(
     provider: parseModelProvider(fallbackBlock?.provider),
     model: coerceString(fallbackBlock?.model),
     baseUrl: coerceString(fallbackBlock?.base_url),
+    apiKey: '',
+    authMode: '',
+    headersText: '',
+    userAgent: '',
   }
 }
 
@@ -863,6 +932,7 @@ function ModelConfigSection(props: {
   onChange: (nextValue: ModelConfigDraft) => void
   modelOptions: Array<SelectOption>
   showPresets?: boolean
+  showAuthOptions?: boolean
   datalistId: string
 }) {
   const {
@@ -872,6 +942,7 @@ function ModelConfigSection(props: {
     onChange,
     modelOptions,
     showPresets = false,
+    showAuthOptions = false,
     datalistId,
   } = props
 
@@ -964,6 +1035,80 @@ function ModelConfigSection(props: {
         </div>
       ) : null}
 
+      {showAuthOptions ? (
+        <div className="mt-4 grid gap-4 md:grid-cols-2">
+          <label className="space-y-1.5">
+            <span className="text-xs font-medium uppercase tracking-[0.12em] text-primary-600">
+              API Key
+            </span>
+            <Input
+              value={value.apiKey}
+              placeholder="OAuth JWT or API key"
+              className="border-[var(--theme-border)] bg-[var(--theme-card)] font-mono text-sm"
+              onChange={(event) => {
+                onChange({
+                  ...value,
+                  apiKey: event.target.value,
+                })
+              }}
+            />
+          </label>
+
+          <label className="space-y-1.5">
+            <span className="text-xs font-medium uppercase tracking-[0.12em] text-primary-600">
+              Auth Mode
+            </span>
+            <select
+              className="h-10 w-full rounded-lg border border-[var(--theme-border)] bg-[var(--theme-card)] px-3 text-sm text-primary-900 outline-none"
+              value={value.authMode}
+              onChange={(event) => {
+                onChange({
+                  ...value,
+                  authMode: parseAuthMode(event.target.value),
+                })
+              }}
+            >
+              <option value="">Default</option>
+              <option value="proxy">Proxy</option>
+            </select>
+          </label>
+
+          <label className="space-y-1.5">
+            <span className="text-xs font-medium uppercase tracking-[0.12em] text-primary-600">
+              Headers
+            </span>
+            <textarea
+              value={value.headersText}
+              placeholder="x-api-key=sk-..."
+              className="min-h-[88px] w-full rounded-lg border border-[var(--theme-border)] bg-[var(--theme-card)] px-3 py-2 font-mono text-sm text-primary-900 outline-none placeholder:text-primary-500"
+              onChange={(event) => {
+                onChange({
+                  ...value,
+                  headersText: event.target.value,
+                })
+              }}
+            />
+          </label>
+
+          <label className="space-y-1.5">
+            <span className="text-xs font-medium uppercase tracking-[0.12em] text-primary-600">
+              User Agent
+            </span>
+            <Input
+              value={value.userAgent}
+              placeholder="pi (linux 6.9.0-dstack; x64)"
+              className="border-[var(--theme-border)] bg-[var(--theme-card)] font-mono text-sm"
+              onChange={(event) => {
+                onChange({
+                  ...value,
+                  userAgent: event.target.value,
+                })
+              }}
+            />
+          </label>
+        </div>
+      ) : null}
+
       <datalist id={datalistId}>
         {modelOptions.map((option) => (
           <option key={option.value} value={option.value}>
@@ -985,11 +1130,19 @@ function ActiveModelCard({
     provider: 'custom',
     model: '',
     baseUrl: '',
+    apiKey: '',
+    authMode: '',
+    headersText: '',
+    userAgent: '',
   })
   const [fallbackConfig, setFallbackConfig] = useState<ModelConfigDraft>({
     provider: 'custom',
     model: '',
     baseUrl: '',
+    apiKey: '',
+    authMode: '',
+    headersText: '',
+    userAgent: '',
   })
   const [performanceConfig, setPerformanceConfig] = useState<PerformanceDraft>({
     streamStaleTimeout: String(DEFAULT_STREAM_STALE_TIMEOUT_SECONDS),
@@ -1019,10 +1172,24 @@ function ActiveModelCard({
         DEFAULT_STREAM_READ_TIMEOUT_SECONDS,
       )
 
+      const primaryHeaders = parseKeyValueLines(primaryConfig.headersText)
+
       const patch: Record<string, unknown> = {
-        model: normalizedPrimaryModel,
-        provider: primaryConfig.provider,
-        base_url: primaryConfig.baseUrl.trim(),
+        model: {
+          default: normalizedPrimaryModel,
+          provider: primaryConfig.provider,
+          base_url: primaryConfig.baseUrl.trim() || null,
+          api_key: primaryConfig.apiKey.trim() || null,
+          auth_mode: primaryConfig.authMode || null,
+          headers: primaryHeaders ?? null,
+          user_agent: primaryConfig.userAgent.trim() || null,
+        },
+        provider: null,
+        base_url: null,
+        api_key: null,
+        auth_mode: null,
+        headers: null,
+        user_agent: null,
         stream_stale_timeout: streamStaleTimeout,
         stream_read_timeout: streamReadTimeout,
         performance: {
@@ -1107,6 +1274,7 @@ function ActiveModelCard({
             onChange={setPrimaryConfig}
             modelOptions={modelOptions}
             showPresets
+            showAuthOptions
             datalistId="settings-primary-model-options"
           />
 
@@ -1389,7 +1557,9 @@ export function ProvidersScreen({ embedded = false }: ProvidersScreenProps) {
   const configAvailable = useFeatureAvailable('config')
   const [activeTab, setActiveTab] = useState<SettingsTabId>('providers')
   const [search, setSearch] = useState('')
-  const [draftValues, setDraftValues] = useState<Record<string, string>>({})
+  const [draftValues, setDraftValues] = useState<
+    Partial<Record<string, string>>
+  >({})
   const [wizardOpen, setWizardOpen] = useState(false)
   const [editingProvider, setEditingProvider] =
     useState<ProviderSummaryForEdit | null>(null)
