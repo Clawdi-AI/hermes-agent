@@ -22,8 +22,8 @@ class ChatRequest(WebAPIModel):
     model: str | None = None
     enabled_toolsets: list[str] | None = None
     disabled_toolsets: list[str] | None = None
-    skip_context_files: bool = False
-    skip_memory: bool = False
+    skip_context_files: bool | None = None
+    skip_memory: bool | None = None
 
 
 class ChatResponse(WebAPIModel):

@@ -207,8 +207,8 @@ def _run_chat(
         ephemeral_system_prompt=payload.system_message,
         enabled_toolsets=payload.enabled_toolsets,
         disabled_toolsets=payload.disabled_toolsets,
-        skip_context_files=payload.skip_context_files,
-        skip_memory=payload.skip_memory,
+        skip_context_files=bool(payload.skip_context_files),
+        skip_memory=bool(payload.skip_memory),
     )
     return agent.run_conversation(
         user_content,
@@ -304,6 +304,9 @@ async def chat_stream(
                     )
 
             def tool_progress_callback(tool_name: str, preview: str, args: dict[str, Any] | None = None) -> None:
+                # `_thinking` is a pseudo-tool that carries the reasoning
+                # stream — surface it as a `tool.progress` event so the
+                # client can render it as a running "thinking" bubble.
                 if tool_name == "_thinking":
                     stream.put(
                         emitter.event(
@@ -313,6 +316,11 @@ async def chat_stream(
                         )
                     )
                     return
+                # For real tools we only emit `tool.pending` here — the
+                # authoritative `tool.started` with the tool_call_id is
+                # emitted from `tool_start_callback` below, so ordering
+                # matches: pending (no id) → started (with id) → completed
+                # (with id). See chat-adapter.ts for the matching logic.
                 stream.put(
                     emitter.event(
                         "tool.pending",
@@ -321,11 +329,22 @@ async def chat_stream(
                         args=args,
                     )
                 )
+
+            def tool_start_callback(
+                tool_call_id: str | None,
+                tool_name: str,
+                args: dict[str, Any] | None = None,
+            ) -> None:
+                # Emitted once per real tool invocation, carrying the
+                # assistant-provided ``tool_call_id`` so the TS client
+                # can match started/completed pairs by id rather than
+                # ordinal. ``_thinking`` is handled by the progress
+                # callback and never reaches this path.
                 stream.put(
                     emitter.event(
                         "tool.started",
+                        tool_call_id=tool_call_id,
                         tool_name=tool_name,
-                        preview=preview,
                         args=args,
                     )
                 )
@@ -341,6 +360,7 @@ async def chat_stream(
                 skip_memory=payload.skip_memory,
                 stream_callback=stream_callback,
                 tool_progress_callback=tool_progress_callback,
+                tool_start_callback=tool_start_callback,
             )
             # Expose the agent to the async generator so client-disconnect
             # handling can call agent.interrupt() on the correct instance.
