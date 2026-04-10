@@ -1,8 +1,9 @@
 import os
 
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from webapi.auth import verify_bearer_token
 from webapi.errors import register_error_handlers
 from webapi.routes.chat import router as chat_router
 from webapi.routes.config import router as config_router
@@ -40,13 +41,17 @@ def create_app() -> FastAPI:
 
     register_error_handlers(app)
 
+    # Health is unauthenticated so load balancers / probes can reach it.
     app.include_router(health_router)
-    app.include_router(models_router)
-    app.include_router(sessions_router)
-    app.include_router(chat_router)
-    app.include_router(memory_router)
-    app.include_router(skills_router)
-    app.include_router(config_router)
+
+    # Everything else is gated by HERMES_API_TOKEN (no-op if env var unset).
+    protected = [Depends(verify_bearer_token)]
+    app.include_router(models_router, dependencies=protected)
+    app.include_router(sessions_router, dependencies=protected)
+    app.include_router(chat_router, dependencies=protected)
+    app.include_router(memory_router, dependencies=protected)
+    app.include_router(skills_router, dependencies=protected)
+    app.include_router(config_router, dependencies=protected)
 
     return app
 
