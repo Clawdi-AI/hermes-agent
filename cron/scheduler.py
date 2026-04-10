@@ -590,6 +590,7 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
                 "api_mode": runtime.get("api_mode"),
                 "command": runtime.get("command"),
                 "args": list(runtime.get("args") or []),
+                "default_headers": runtime.get("default_headers"),
             },
         )
 
@@ -601,6 +602,7 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
             api_mode=turn_route["runtime"].get("api_mode"),
             acp_command=turn_route["runtime"].get("command"),
             acp_args=turn_route["runtime"].get("args"),
+            default_headers=turn_route["runtime"].get("default_headers"),
             max_iterations=max_iterations,
             reasoning_config=reasoning_config,
             prefill_messages=prefill_messages,

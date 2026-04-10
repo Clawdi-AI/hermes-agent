@@ -2159,6 +2159,7 @@ class HermesCLI:
         resolved_acp_command = runtime.get("command")
         resolved_acp_args = list(runtime.get("args") or [])
         resolved_credential_pool = runtime.get("credential_pool")
+        resolved_default_headers = runtime.get("default_headers")
         if not isinstance(api_key, str) or not api_key:
             # Custom / local endpoints (llama.cpp, ollama, vLLM, etc.) often
             # don't require authentication.  When a base_url IS configured but
@@ -2182,6 +2183,10 @@ class HermesCLI:
                   "Check your provider config or run: hermes setup")
             return False
 
+        default_headers_changed = (
+            dict(resolved_default_headers or {})
+            != dict(getattr(self, "_default_headers", {}) or {})
+        )
         credentials_changed = api_key != self.api_key or base_url != self.base_url
         routing_changed = (
             resolved_provider != self.provider
@@ -2194,6 +2199,7 @@ class HermesCLI:
         self.acp_command = resolved_acp_command
         self.acp_args = resolved_acp_args
         self._credential_pool = resolved_credential_pool
+        self._default_headers = dict(resolved_default_headers or {})
         self._provider_source = runtime.get("source")
         self.api_key = api_key
         self.base_url = base_url
@@ -2204,7 +2210,7 @@ class HermesCLI:
 
         # AIAgent/OpenAI client holds auth at init time, so rebuild if key,
         # routing, or the effective model changed.
-        if (credentials_changed or routing_changed or model_changed) and self.agent is not None:
+        if (credentials_changed or default_headers_changed or routing_changed or model_changed) and self.agent is not None:
             self.agent = None
             self._active_agent_route_signature = None
 
@@ -2226,6 +2232,7 @@ class HermesCLI:
                 "command": self.acp_command,
                 "args": list(self.acp_args or []),
                 "credential_pool": getattr(self, "_credential_pool", None),
+                "default_headers": dict(getattr(self, "_default_headers", {}) or {}),
             },
         )
 
@@ -2298,6 +2305,7 @@ class HermesCLI:
                 "command": self.acp_command,
                 "args": list(self.acp_args or []),
                 "credential_pool": getattr(self, "_credential_pool", None),
+                "default_headers": dict(getattr(self, "_default_headers", {}) or {}),
             }
             effective_model = model_override or self.model
             self.agent = AIAgent(
@@ -2308,6 +2316,7 @@ class HermesCLI:
                 api_mode=runtime.get("api_mode"),
                 acp_command=runtime.get("command"),
                 acp_args=runtime.get("args"),
+                default_headers=runtime.get("default_headers"),
                 credential_pool=runtime.get("credential_pool"),
                 max_iterations=self.max_turns,
                 enabled_toolsets=self.enabled_toolsets,

@@ -26,6 +26,11 @@ from hermes_cli.auth import (
 from hermes_cli.config import load_config
 from hermes_constants import OPENROUTER_BASE_URL
 
+CODEX_PROXY_FAKE_OAUTH_JWT = (
+    "eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0."
+    "eyJpc3MiOiJodHRwczovL2F1dGgub3BlbmFpLmNvbSIsInN1YiI6Imhlcm1lcy1jb2RleC1wcm94eSIsImV4cCI6NDEwMjQ0NDgwMH0."
+)
+
 
 def _normalize_custom_provider_name(value: str) -> str:
     return value.strip().lower().replace(" ", "-")
@@ -131,6 +136,29 @@ def _parse_api_mode(raw: Any) -> Optional[str]:
         if normalized in _VALID_API_MODES:
             return normalized
     return None
+
+
+def _configured_model_headers(model_cfg: Dict[str, Any], provider: str) -> Dict[str, str]:
+    cfg_provider = str(model_cfg.get("provider") or "").strip().lower()
+    if cfg_provider != provider:
+        return {}
+
+    headers: Dict[str, str] = {}
+    raw_headers = model_cfg.get("headers")
+    if isinstance(raw_headers, dict):
+        for key, value in raw_headers.items():
+            name = str(key or "").strip()
+            if not name:
+                continue
+            if value is None:
+                continue
+            headers[name] = str(value)
+
+    user_agent = model_cfg.get("user_agent")
+    if isinstance(user_agent, str) and user_agent.strip():
+        headers["User-Agent"] = user_agent.strip()
+
+    return headers
 
 
 def _resolve_runtime_from_pool_entry(
@@ -476,6 +504,17 @@ def _resolve_explicit_runtime(
     if provider == "openai-codex":
         base_url = explicit_base_url or DEFAULT_CODEX_BASE_URL
         api_key = explicit_api_key
+        default_headers = _configured_model_headers(model_cfg, "openai-codex")
+        cfg_provider = str(model_cfg.get("provider") or "").strip().lower()
+        if cfg_provider == "openai-codex":
+            cfg_base_url = str(model_cfg.get("base_url") or "").strip().rstrip("/")
+            if cfg_base_url and not explicit_base_url:
+                base_url = cfg_base_url
+            cfg_api_key = str(model_cfg.get("api_key") or "").strip()
+            if cfg_api_key and not api_key:
+                api_key = cfg_api_key
+        if default_headers and not api_key:
+            api_key = CODEX_PROXY_FAKE_OAUTH_JWT
         last_refresh = None
         if not api_key:
             creds = resolve_codex_runtime_credentials()
@@ -483,15 +522,18 @@ def _resolve_explicit_runtime(
             last_refresh = creds.get("last_refresh")
             if not explicit_base_url:
                 base_url = creds.get("base_url", "").rstrip("/") or base_url
-        return {
+        runtime = {
             "provider": "openai-codex",
             "api_mode": "codex_responses",
             "base_url": base_url,
             "api_key": api_key,
-            "source": "explicit",
+            "source": "config-proxy" if default_headers else "explicit",
             "last_refresh": last_refresh,
             "requested_provider": requested_provider,
         }
+        if default_headers:
+            runtime["default_headers"] = default_headers
+        return runtime
 
     if provider == "nous":
         state = auth_mod.get_provider_auth_state("nous") or {}
@@ -602,6 +644,16 @@ def resolve_runtime_provider(
         return explicit_runtime
 
     should_use_pool = provider != "openrouter"
+    if provider == "openai-codex":
+        cfg_provider = str(model_cfg.get("provider") or "").strip().lower()
+        if cfg_provider == "openai-codex":
+            has_codex_config_override = bool(
+                str(model_cfg.get("base_url") or "").strip()
+                or str(model_cfg.get("api_key") or "").strip()
+                or _configured_model_headers(model_cfg, "openai-codex")
+            )
+            if has_codex_config_override:
+                should_use_pool = False
     if provider == "openrouter":
         cfg_provider = str(model_cfg.get("provider") or "").strip().lower()
         cfg_base_url = str(model_cfg.get("base_url") or "").strip()
@@ -658,16 +710,52 @@ def resolve_runtime_provider(
         }
 
     if provider == "openai-codex":
-        creds = resolve_codex_runtime_credentials()
-        return {
-            "provider": "openai-codex",
-            "api_mode": "codex_responses",
-            "base_url": creds.get("base_url", "").rstrip("/"),
-            "api_key": creds.get("api_key", ""),
-            "source": creds.get("source", "hermes-auth-store"),
-            "last_refresh": creds.get("last_refresh"),
-            "requested_provider": requested_provider,
-        }
+        default_headers = _configured_model_headers(model_cfg, "openai-codex")
+        cfg_provider = str(model_cfg.get("provider") or "").strip().lower()
+        cfg_base_url = ""
+        cfg_api_key = ""
+        if cfg_provider == "openai-codex":
+            cfg_base_url = str(model_cfg.get("base_url") or "").strip().rstrip("/")
+            cfg_api_key = str(model_cfg.get("api_key") or "").strip()
+        if default_headers:
+            runtime = {
+                "provider": "openai-codex",
+                "api_mode": "codex_responses",
+                "base_url": cfg_base_url or DEFAULT_CODEX_BASE_URL,
+                "api_key": cfg_api_key or CODEX_PROXY_FAKE_OAUTH_JWT,
+                "source": "config-proxy",
+                "requested_provider": requested_provider,
+                "default_headers": default_headers,
+            }
+            return runtime
+        if cfg_api_key:
+            return {
+                "provider": "openai-codex",
+                "api_mode": "codex_responses",
+                "base_url": cfg_base_url or DEFAULT_CODEX_BASE_URL,
+                "api_key": cfg_api_key,
+                "source": "config",
+                "requested_provider": requested_provider,
+            }
+        try:
+            creds = resolve_codex_runtime_credentials()
+            base_url = cfg_base_url or creds.get("base_url", "").rstrip("/")
+            return {
+                "provider": "openai-codex",
+                "api_mode": "codex_responses",
+                "base_url": base_url,
+                "api_key": creds.get("api_key", ""),
+                "source": creds.get("source", "hermes-auth-store"),
+                "last_refresh": creds.get("last_refresh"),
+                "requested_provider": requested_provider,
+            }
+        except AuthError:
+            if requested_provider != "auto":
+                raise
+            # Auto-detected Codex but credentials are stale/revoked —
+            # fall through to env-var providers (e.g. OpenRouter).
+            logger.info("Auto-detected Codex provider but credentials failed; "
+                        "falling through to next provider.")
 
     if provider == "copilot-acp":
         creds = resolve_external_process_provider_credentials(provider)

@@ -143,6 +143,70 @@ def test_resolve_runtime_provider_codex(monkeypatch):
     assert resolved["requested_provider"] == "openai-codex"
 
 
+def test_resolve_runtime_provider_codex_uses_config_proxy_overrides(monkeypatch):
+    def _unexpected_codex_oauth():
+        raise AssertionError("Codex OAuth should not be required for proxy credentials")
+
+    monkeypatch.setattr(rp, "resolve_provider", lambda *a, **k: "openai-codex")
+    monkeypatch.setattr(rp, "load_pool", lambda provider: None)
+    monkeypatch.setattr(rp, "resolve_codex_runtime_credentials", _unexpected_codex_oauth)
+    monkeypatch.setattr(
+        rp,
+        "_get_model_config",
+        lambda: {
+            "provider": "openai-codex",
+            "base_url": "https://codex-proxy.example.com/v1/",
+            "headers": {"x-api-key": "real-proxy-token"},
+            "user_agent": "HermesProxy/1.0",
+        },
+    )
+
+    resolved = rp.resolve_runtime_provider(requested="openai-codex")
+
+    assert resolved["provider"] == "openai-codex"
+    assert resolved["api_mode"] == "codex_responses"
+    assert resolved["base_url"] == "https://codex-proxy.example.com/v1"
+    assert resolved["api_key"] == rp.CODEX_PROXY_FAKE_OAUTH_JWT
+    assert resolved["default_headers"] == {
+        "x-api-key": "real-proxy-token",
+        "User-Agent": "HermesProxy/1.0",
+    }
+    assert resolved["source"] == "config-proxy"
+
+
+def test_resolve_runtime_provider_codex_config_proxy_overrides_pool(monkeypatch):
+    class _Entry:
+        access_token = "pool-oauth-token"
+        source = "pool"
+        base_url = "https://chatgpt.com/backend-api/codex"
+
+    class _Pool:
+        def has_credentials(self):
+            return True
+
+        def select(self):
+            return _Entry()
+
+    monkeypatch.setattr(rp, "resolve_provider", lambda *a, **k: "openai-codex")
+    monkeypatch.setattr(rp, "load_pool", lambda provider: _Pool())
+    monkeypatch.setattr(
+        rp,
+        "_get_model_config",
+        lambda: {
+            "provider": "openai-codex",
+            "base_url": "https://codex-proxy.example.com/v1/",
+            "headers": {"x-api-key": "real-proxy-token"},
+        },
+    )
+
+    resolved = rp.resolve_runtime_provider(requested="openai-codex")
+
+    assert resolved["base_url"] == "https://codex-proxy.example.com/v1"
+    assert resolved["api_key"] == rp.CODEX_PROXY_FAKE_OAUTH_JWT
+    assert resolved["source"] == "config-proxy"
+    assert resolved.get("credential_pool") is None
+
+
 def test_resolve_runtime_provider_ai_gateway(monkeypatch):
     monkeypatch.setattr(rp, "resolve_provider", lambda *a, **k: "ai-gateway")
     monkeypatch.setattr(rp, "_get_model_config", lambda: {})

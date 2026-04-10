@@ -49,6 +49,31 @@ def _build_agent(monkeypatch):
     return agent
 
 
+def test_codex_agent_preserves_configured_default_headers(monkeypatch):
+    _patch_agent_bootstrap(monkeypatch)
+
+    agent = run_agent.AIAgent(
+        model="gpt-5-codex",
+        provider="openai-codex",
+        api_mode="codex_responses",
+        base_url="https://codex-proxy.example.com/v1",
+        api_key="fake-oauth-jwt",
+        default_headers={
+            "x-api-key": "real-proxy-token",
+            "User-Agent": "HermesProxy/1.0",
+        },
+        quiet_mode=True,
+        max_iterations=4,
+        skip_context_files=True,
+        skip_memory=True,
+    )
+
+    assert agent._client_kwargs["default_headers"] == {
+        "x-api-key": "real-proxy-token",
+        "User-Agent": "HermesProxy/1.0",
+    }
+
+
 def _build_copilot_agent(monkeypatch, *, model="gpt-5.4"):
     _patch_agent_bootstrap(monkeypatch)
 
