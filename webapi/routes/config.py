@@ -1,11 +1,11 @@
 from typing import Any
 
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 from hermes_cli.config import load_config, save_config
 from webapi.deps import get_config, get_runtime_agent_kwargs, get_runtime_model
-from webapi.models.config import ConfigResponse
+from webapi.models.config import ConfigPatchResponse, ConfigResponse
 
 
 router = APIRouter(prefix="/api/config", tags=["config"])
@@ -127,8 +127,8 @@ async def get_web_config() -> ConfigResponse:
     )
 
 
-@router.patch("")
-async def patch_web_config(patch: ConfigPatch) -> dict[str, Any]:
+@router.patch("", response_model=ConfigPatchResponse)
+async def patch_web_config(patch: ConfigPatch) -> ConfigPatchResponse:
     """Patch ``~/.hermes/config.yaml`` with the provided fields.
 
     Top-level model/provider/base_url keys are set directly. Any
@@ -164,14 +164,13 @@ async def patch_web_config(patch: ConfigPatch) -> dict[str, Any]:
             config[section] = _deep_merge(existing, section_patch)
 
         save_config(config)
-        return {
-            "ok": True,
-            "model": config.get("model"),
-            "provider": config.get("provider"),
-            "base_url": config.get("base_url"),
-            "merged_sections": [
+        return ConfigPatchResponse(
+            model=config.get("model"),
+            provider=config.get("provider"),
+            base_url=config.get("base_url"),
+            merged_sections=[
                 section for section in _MERGEABLE_SECTIONS if patch_dict.get(section) is not None
             ],
-        }
+        )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e)) from e

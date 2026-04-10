@@ -95,8 +95,24 @@ class _FakeSessionDB:
         return _sessions_store.pop(sid, None) is not None
 
     def search_messages(self, q, source_filter=None, limit=20, offset=0):
+        # Fake row shape matches the SQL projection in
+        # hermes_state.SessionDB.search_messages (id, session_id, role,
+        # snippet, timestamp, tool_name, source, model, session_started,
+        # context) so the typed SearchSessionsResponse pydantic model
+        # validates against it.
         return [
-            {"session_id": sid, "snippet": f"match for {q}"}
+            {
+                "id": 1,
+                "session_id": sid,
+                "role": "user",
+                "snippet": f"match for {q}",
+                "timestamp": 0.0,
+                "tool_name": None,
+                "source": "web",
+                "model": None,
+                "session_started": 0.0,
+                "context": [],
+            }
             for sid in _sessions_store
         ]
 
@@ -185,10 +201,15 @@ def _install_stubs() -> None:
         {"success": True, "content": "# skill"}
     )
     sys.modules["tools.skills_tool"].skills_categories = lambda: json.dumps(  # type: ignore[attr-defined]
-        {"success": True, "categories": [{"name": "a", "count": 1}]}
+        {"success": True, "categories": [{"name": "a", "skill_count": 1}]}
     )
     sys.modules["tools.skills_tool"].skills_list = lambda **k: json.dumps(  # type: ignore[attr-defined]
-        {"success": True, "skills": [{"name": "s", "category": "a"}]}
+        {
+            "success": True,
+            "skills": [{"name": "s", "category": "a", "description": "d"}],
+            "categories": ["a"],
+            "count": 1,
+        }
     )
 
     cj = sys.modules["cron.jobs"]

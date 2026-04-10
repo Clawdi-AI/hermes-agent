@@ -17,6 +17,17 @@ class MemoryDeleteRequest(WebAPIModel):
     old_text: str
 
 
+class MemoryTarget(WebAPIModel):
+    """Single memory-target snapshot (either the shared ``memory`` or
+    per-user ``user`` target).
+    """
+
+    target: str
+    entries: list[str]
+    usage: str
+    entry_count: int
+
+
 class MemoryMutationResponse(WebAPIModel):
     success: bool
     target: str
@@ -27,4 +38,4 @@ class MemoryMutationResponse(WebAPIModel):
 
 
 class MemoryReadResponse(WebAPIModel):
-    targets: list[dict]
+    targets: list[MemoryTarget]

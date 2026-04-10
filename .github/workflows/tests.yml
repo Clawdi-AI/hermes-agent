@@ -34,9 +34,49 @@ jobs:
       - name: Run tests
         run: |
           source .venv/bin/activate
-          python -m pytest tests/ -q --ignore=tests/integration --ignore=tests/e2e --tb=short -n auto
+          python -m pytest tests/ -q \
+            --ignore=tests/integration \
+            --ignore=tests/e2e \
+            --ignore=tests/webapi \
+            --tb=short -n auto
         env:
           # Ensure tests don't accidentally call real APIs
+          OPENROUTER_API_KEY: ""
+          OPENAI_API_KEY: ""
+          NOUS_API_KEY: ""
+
+  # The webapi suite monkey-patches heavy hermes internals (tools.*,
+  # hermes_state, run_agent, cron.jobs, gateway.run) as plain stub
+  # modules at conftest import time so the FastAPI app can boot without
+  # pulling in the full agent stack. That stubbing turns `tools` into a
+  # non-package, which breaks `tests/tools/*` imports when they share a
+  # pytest process. Running webapi in its own job keeps the stubs
+  # hermetic.
+  webapi:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Set up Python 3.11
+        run: uv python install 3.11
+
+      - name: Install dependencies
+        run: |
+          uv venv .venv --python 3.11
+          source .venv/bin/activate
+          uv pip install -e ".[webapi,dev]"
+
+      - name: Run webapi tests
+        run: |
+          source .venv/bin/activate
+          python -m pytest tests/webapi/ -o 'addopts=' --tb=short
+        env:
+          HERMES_API_TOKEN: ""
           OPENROUTER_API_KEY: ""
           OPENAI_API_KEY: ""
           NOUS_API_KEY: ""

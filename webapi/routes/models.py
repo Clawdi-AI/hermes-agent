@@ -4,46 +4,49 @@ from typing import Optional
 from fastapi import APIRouter, Query
 
 from webapi.deps import get_runtime_model
+from webapi.models.models import (
+    AvailableModel,
+    AvailableModelsResponse,
+    OpenAIModelInfo,
+    OpenAIModelsResponse,
+)
 
 router = APIRouter()
 
 
-@router.get("/v1/models")
-async def list_models() -> dict:
+@router.get("/v1/models", response_model=OpenAIModelsResponse)
+async def list_models() -> OpenAIModelsResponse:
     runtime_model = get_runtime_model()
     now = int(time.time())
-    return {
-        "object": "list",
-        "data": [
-            {
-                "id": "hermes-agent",
-                "object": "model",
-                "created": now,
-                "owned_by": "hermes",
-                "permission": [],
-                "root": "hermes-agent",
-                "parent": None,
-                "runtime_model": runtime_model,
-            },
-            {
-                "id": runtime_model,
-                "object": "model",
-                "created": now,
-                "owned_by": "runtime",
-                "permission": [],
-                "root": runtime_model,
-                "parent": "hermes-agent",
-            },
+    return OpenAIModelsResponse(
+        data=[
+            OpenAIModelInfo(
+                id="hermes-agent",
+                created=now,
+                owned_by="hermes",
+                root="hermes-agent",
+                parent=None,
+                runtime_model=runtime_model,
+            ),
+            OpenAIModelInfo(
+                id=runtime_model,
+                created=now,
+                owned_by="runtime",
+                root=runtime_model,
+                parent="hermes-agent",
+            ),
         ],
-    }
+    )
 
 
-@router.get("/api/available-models")
-async def available_models(provider: Optional[str] = Query(None)) -> dict:
+@router.get("/api/available-models", response_model=AvailableModelsResponse)
+async def available_models(
+    provider: Optional[str] = Query(None),
+) -> AvailableModelsResponse:
     """Return available models for a provider.
 
-    Uses the same resolution as `hermes setup`: live API query first,
-    then static catalog fallback.  If provider is omitted, uses the
+    Uses the same resolution as ``hermes setup``: live API query first,
+    then static catalog fallback. If ``provider`` is omitted, uses the
     currently configured provider.
     """
     from hermes_cli.models import (
@@ -60,8 +63,8 @@ async def available_models(provider: Optional[str] = Query(None)) -> dict:
     models = curated_models_for_provider(effective_provider)
     providers = list_available_providers()
 
-    return {
-        "provider": effective_provider,
-        "models": [{"id": m[0], "description": m[1]} for m in models],
-        "providers": providers,
-    }
+    return AvailableModelsResponse(
+        provider=effective_provider,
+        models=[AvailableModel(id=m[0], description=m[1]) for m in models],
+        providers=providers,
+    )

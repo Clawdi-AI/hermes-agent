@@ -12,6 +12,7 @@ from webapi.models.sessions import (
     MessageRecord,
     SearchSessionsResponse,
     SessionCreateRequest,
+    SessionDeleteResponse,
     SessionDetailResponse,
     SessionListResponse,
     SessionPatchRequest,
@@ -168,11 +169,11 @@ async def patch_session(
     return SessionDetailResponse(session=_coerce_session(updated))
 
 
-@router.delete("/{session_id}")
+@router.delete("/{session_id}", response_model=SessionDeleteResponse)
 async def delete_session(
     session_id: str,
     session_db: Annotated[SessionDB, Depends(get_session_db)],
-) -> dict[str, bool | str]:
+) -> SessionDeleteResponse:
     try:
         deleted = session_db.delete_session(session_id)
     except sqlite3.IntegrityError as exc:
@@ -184,7 +185,7 @@ async def delete_session(
         ) from exc
     if not deleted:
         raise HTTPException(status_code=404, detail=f"Session '{session_id}' not found")
-    return {"ok": True, "session_id": session_id}
+    return SessionDeleteResponse(session_id=session_id)
 
 
 @router.post("/{session_id}/fork", response_model=ForkSessionResponse)

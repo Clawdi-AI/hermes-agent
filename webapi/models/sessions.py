@@ -69,12 +69,39 @@ class MessageListResponse(WebAPIModel):
     total: int
 
 
+class SearchSessionContext(WebAPIModel):
+    role: str
+    content: str
+
+
+class SearchSessionMatch(WebAPIModel):
+    """One FTS5 hit from ``GET /api/sessions/search``. Shape matches the SQL
+    projection in ``hermes_state.SessionDB.search_messages``.
+    """
+
+    id: int
+    session_id: str
+    role: str
+    snippet: str
+    timestamp: float
+    tool_name: str | None = None
+    source: str | None = None
+    model: str | None = None
+    session_started: float | None = None
+    context: list[SearchSessionContext] = []
+
+
 class SearchSessionsResponse(WebAPIModel):
     query: str
     count: int
-    results: list[dict[str, Any]]
+    results: list[SearchSessionMatch]
 
 
 class ForkSessionResponse(WebAPIModel):
     session: SessionRecord
     forked_from: str = Field(..., alias="forked_from")
+
+
+class SessionDeleteResponse(WebAPIModel):
+    ok: bool = True
+    session_id: str

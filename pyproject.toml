@@ -72,7 +72,15 @@ rl = [
   "wandb>=0.15.0,<1",
 ]
 yc-bench = ["yc-bench @ git+https://github.com/collinear-ai/yc-bench.git ; python_version >= '3.12'"]
+# Dashboard FastAPI backend (webapi/ module). Consumed by the Clawdi fork's
+# `dashboard` entrypoint mode and the Clawdi frontend.
+webapi = [
+  "fastapi>=0.104.0,<1",
+  "uvicorn[standard]>=0.24.0,<1",
+  "python-multipart>=0.0.9,<1",
+]
 all = [
+  "hermes-agent[webapi]",
   "hermes-agent[modal]",
   "hermes-agent[daytona]",
   "hermes-agent[messaging]",

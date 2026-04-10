@@ -1,9 +1,11 @@
 from fastapi import APIRouter
 
+from webapi.models.health import HealthResponse
+
 
 router = APIRouter()
 
 
-@router.get("/health")
-async def health() -> dict[str, str]:
-    return {"status": "ok", "platform": "hermes-agent", "service": "webapi"}
+@router.get("/health", response_model=HealthResponse)
+async def health() -> HealthResponse:
+    return HealthResponse()
