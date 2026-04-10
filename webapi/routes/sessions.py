@@ -94,11 +94,54 @@ async def get_session(
 async def get_session_messages(
     session_id: str,
     session_db: Annotated[SessionDB, Depends(get_session_db)],
+    limit: int = Query(
+        default=0,
+        ge=0,
+        le=1000,
+        description="Max messages to return. 0 = all (legacy behavior).",
+    ),
+    offset: int = Query(
+        default=0,
+        ge=0,
+        description="Skip this many messages from the BEGINNING of the session history.",
+    ),
+    tail: bool = Query(
+        default=False,
+        description="When true, return the last `limit` messages instead of the first. "
+                    "Equivalent to `offset = total - limit`. Useful for chat UIs that load "
+                    "the most recent N messages on first render.",
+    ),
 ) -> MessageListResponse:
+    """Return messages for a session with optional pagination.
+
+    By default (limit=0) the whole transcript is returned in chronological
+    order — matches the legacy behavior. When `limit` is set:
+
+    - `offset` skips messages from the beginning (default 0).
+    - `tail=true` returns the LAST `limit` messages regardless of offset.
+
+    `total` in the response is always the full session message count so
+    the client can render correct "X of N" indicators and know when it
+    has reached the head.
+    """
     if not session_db.get_session(session_id):
         raise HTTPException(status_code=404, detail=f"Session '{session_id}' not found")
     messages = session_db.get_messages(session_id)
-    return MessageListResponse(items=[_coerce_message(item) for item in messages], total=len(messages))
+    total = len(messages)
+
+    # Slice according to pagination params.
+    if limit == 0:
+        selected = messages
+    elif tail:
+        start = max(0, total - limit)
+        selected = messages[start : start + limit]
+    else:
+        selected = messages[offset : offset + limit]
+
+    return MessageListResponse(
+        items=[_coerce_message(item) for item in selected],
+        total=total,
+    )
 
 
 @router.patch("/{session_id}", response_model=SessionDetailResponse)
