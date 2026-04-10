@@ -40,7 +40,9 @@ _MERGEABLE_SECTIONS = (
     "cron",
     "display",
     "toolsets",
-    "mcp",
+    # Hermes stores MCP server definitions under `mcp_servers` (not `mcp`)
+    # — see hermes_cli/mcp_config.py:8 + :81.
+    "mcp_servers",
 )
 
 
@@ -102,7 +104,9 @@ class ConfigPatch(BaseModel):
     cron: dict[str, Any] | None = None
     display: dict[str, Any] | None = None
     toolsets: dict[str, Any] | None = None
-    mcp: dict[str, Any] | None = None
+    # Hermes stores MCP server definitions under `mcp_servers` (not `mcp`)
+    # — see hermes_cli/mcp_config.py:8 + :81.
+    mcp_servers: dict[str, Any] | None = None
 
 
 @router.get("", response_model=ConfigResponse)
