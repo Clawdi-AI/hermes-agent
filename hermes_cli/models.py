@@ -87,7 +87,10 @@ _PROVIDER_MODELS: dict[str, list[str]] = {
         "openai/gpt-5.4-nano",
     ],
     "openai-codex": [
+        "gpt-5.4-mini",
+        "gpt-5.4",
         "gpt-5.3-codex",
+        "gpt-5.3-codex-spark",
         "gpt-5.2-codex",
         "gpt-5.1-codex-mini",
         "gpt-5.1-codex-max",
@@ -1677,6 +1680,17 @@ def validate_requested_model(
             "persist": False,
             "recognized": False,
             "message": "Model names cannot contain spaces.",
+        }
+
+    if (
+        normalized == "openai-codex"
+        and requested_for_lookup in set(provider_model_ids(normalized))
+    ):
+        return {
+            "accepted": True,
+            "persist": True,
+            "recognized": True,
+            "message": None,
         }
 
     if normalized == "custom":
