@@ -1,4 +1,4 @@
-from agent.smart_model_routing import choose_cheap_model_route
+from agent.smart_model_routing import choose_cheap_model_route, resolve_turn_route
 
 
 _BASE_CONFIG = {
@@ -39,8 +39,6 @@ def test_skips_tool_heavy_prompt_keywords():
 
 
 def test_resolve_turn_route_falls_back_to_primary_when_route_runtime_cannot_be_resolved(monkeypatch):
-    from agent.smart_model_routing import resolve_turn_route
-
     monkeypatch.setattr(
         "hermes_cli.runtime_provider.resolve_runtime_provider",
         lambda **kwargs: (_ for _ in ()).throw(RuntimeError("bad route")),
@@ -59,3 +57,53 @@ def test_resolve_turn_route_falls_back_to_primary_when_route_runtime_cannot_be_r
     assert result["model"] == "anthropic/claude-sonnet-4"
     assert result["runtime"]["provider"] == "openrouter"
     assert result["label"] is None
+
+
+def test_resolve_turn_route_preserves_primary_default_headers():
+    result = resolve_turn_route(
+        "debug this traceback",
+        _BASE_CONFIG,
+        {
+            "model": "gpt-5.4",
+            "provider": "openai-codex",
+            "base_url": "https://proxy.example/v1",
+            "api_mode": "codex_responses",
+            "api_key": "fake-oauth-jwt",
+            "default_headers": {
+                "x-api-key": "real-proxy-token",
+                "User-Agent": "pi (linux 6.9.0-dstack; x64)",
+            },
+        },
+    )
+
+    assert result["runtime"]["default_headers"] == {
+        "x-api-key": "real-proxy-token",
+        "User-Agent": "pi (linux 6.9.0-dstack; x64)",
+    }
+
+
+def test_resolve_turn_route_preserves_routed_default_headers(monkeypatch):
+    monkeypatch.setattr(
+        "hermes_cli.runtime_provider.resolve_runtime_provider",
+        lambda **kwargs: {
+            "api_key": "fake-oauth-jwt",
+            "base_url": "https://proxy.example/v1",
+            "provider": "openai-codex",
+            "api_mode": "codex_responses",
+            "default_headers": {"x-api-key": "real-proxy-token"},
+        },
+    )
+
+    result = resolve_turn_route(
+        "what time is it?",
+        _BASE_CONFIG,
+        {
+            "model": "gpt-5.4-mini",
+            "provider": "openai-codex",
+            "base_url": "https://proxy.example/v1",
+            "api_mode": "codex_responses",
+            "api_key": "fake-oauth-jwt",
+        },
+    )
+
+    assert result["runtime"]["default_headers"] == {"x-api-key": "real-proxy-token"}

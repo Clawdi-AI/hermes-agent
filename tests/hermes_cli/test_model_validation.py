@@ -18,6 +18,7 @@ from hermes_cli.models import (
     provider_model_ids,
     validate_requested_model,
 )
+from hermes_cli.model_switch import switch_model
 
 
 # -- helpers -----------------------------------------------------------------
@@ -218,6 +219,35 @@ class TestValidateRequestedModel:
             "persist": True,
             "recognized": True,
             "message": None,
+        }
+
+
+class TestModelSwitchRuntimeHeaders:
+    def test_openai_codex_switch_preserves_runtime_default_headers(self):
+        with patch(
+            "hermes_cli.runtime_provider.resolve_runtime_provider",
+            return_value={
+                "provider": "openai-codex",
+                "api_key": "fake-oauth-jwt",
+                "base_url": "https://proxy.example/v1",
+                "api_mode": "codex_responses",
+                "default_headers": {
+                    "x-api-key": "real-proxy-token",
+                    "User-Agent": "pi (linux 6.9.0-dstack; x64)",
+                },
+            },
+        ):
+            result = switch_model(
+                raw_input="gpt-5.4",
+                current_provider="openrouter",
+                current_model="anthropic/claude-sonnet-4.6",
+                explicit_provider="openai-codex",
+            )
+
+        assert result.success is True
+        assert result.default_headers == {
+            "x-api-key": "real-proxy-token",
+            "User-Agent": "pi (linux 6.9.0-dstack; x64)",
         }
 
 

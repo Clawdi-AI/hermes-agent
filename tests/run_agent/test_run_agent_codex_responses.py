@@ -527,6 +527,57 @@ def test_try_refresh_codex_client_credentials_rebuilds_client(monkeypatch):
     assert isinstance(agent.client, _RebuiltClient)
 
 
+def test_switch_model_preserves_configured_default_headers(monkeypatch):
+    _patch_agent_bootstrap(monkeypatch)
+    rebuilt = {"kwargs": None}
+
+    class _RebuiltClient:
+        pass
+
+    def _fake_openai(**kwargs):
+        rebuilt["kwargs"] = kwargs
+        return _RebuiltClient()
+
+    monkeypatch.setattr(run_agent, "OpenAI", _fake_openai)
+
+    agent = run_agent.AIAgent(
+        model="gpt-5.4-mini",
+        provider="openai-codex",
+        api_mode="codex_responses",
+        base_url="https://codex-proxy.example.com/v1",
+        api_key="fake-oauth-jwt",
+        default_headers={
+            "x-api-key": "real-proxy-token",
+            "User-Agent": "pi (linux 6.9.0-dstack; x64)",
+        },
+        quiet_mode=True,
+        max_iterations=4,
+        skip_context_files=True,
+        skip_memory=True,
+    )
+
+    agent.switch_model(
+        new_model="gpt-5.4",
+        new_provider="openai-codex",
+        api_key="fake-oauth-jwt",
+        base_url="https://codex-proxy.example.com/v1",
+        api_mode="codex_responses",
+        default_headers={
+            "x-api-key": "real-proxy-token",
+            "User-Agent": "pi (linux 6.9.0-dstack; x64)",
+        },
+    )
+
+    assert rebuilt["kwargs"]["default_headers"] == {
+        "x-api-key": "real-proxy-token",
+        "User-Agent": "pi (linux 6.9.0-dstack; x64)",
+    }
+    assert agent._primary_runtime["client_kwargs"]["default_headers"] == {
+        "x-api-key": "real-proxy-token",
+        "User-Agent": "pi (linux 6.9.0-dstack; x64)",
+    }
+
+
 def test_run_conversation_codex_tool_round_trip(monkeypatch):
     agent = _build_agent(monkeypatch)
     responses = [_codex_tool_call_response(), _codex_message_response("done")]
