@@ -470,6 +470,7 @@ class AIAgent:
         acp_args: list[str] | None = None,
         command: str = None,
         args: list[str] | None = None,
+        default_headers: Dict[str, str] = None,
         model: str = "",
         max_iterations: int = 90,  # Default tool-calling iterations (shared with subagents)
         tool_delay: float = 1.0,
@@ -778,25 +779,27 @@ class AIAgent:
                 # Explicit credentials from CLI/gateway — construct directly.
                 # The runtime provider resolver already handled auth for us.
                 client_kwargs = {"api_key": api_key, "base_url": base_url}
+                if default_headers:
+                    client_kwargs["default_headers"] = dict(default_headers)
                 if self.provider == "copilot-acp":
                     client_kwargs["command"] = self.acp_command
                     client_kwargs["args"] = self.acp_args
                 effective_base = base_url
-                if "openrouter" in effective_base.lower():
+                if "openrouter" in effective_base.lower() and "default_headers" not in client_kwargs:
                     client_kwargs["default_headers"] = {
                         "HTTP-Referer": "https://hermes-agent.nousresearch.com",
                         "X-OpenRouter-Title": "Hermes Agent",
                         "X-OpenRouter-Categories": "productivity,cli-agent",
                     }
-                elif "api.githubcopilot.com" in effective_base.lower():
+                elif "api.githubcopilot.com" in effective_base.lower() and "default_headers" not in client_kwargs:
                     from hermes_cli.models import copilot_default_headers
 
                     client_kwargs["default_headers"] = copilot_default_headers()
-                elif "api.kimi.com" in effective_base.lower():
+                elif "api.kimi.com" in effective_base.lower() and "default_headers" not in client_kwargs:
                     client_kwargs["default_headers"] = {
                         "User-Agent": "KimiCLI/1.3",
                     }
-                elif "portal.qwen.ai" in effective_base.lower():
+                elif "portal.qwen.ai" in effective_base.lower() and "default_headers" not in client_kwargs:
                     client_kwargs["default_headers"] = _qwen_portal_headers()
             else:
                 # No explicit creds — use the centralized provider router
