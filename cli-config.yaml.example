@@ -48,8 +48,10 @@ model:
   # api_key: "your-key-here"  # Uncomment to set here instead of .env
   base_url: "https://openrouter.ai/api/v1"
   # Optional custom headers for provider/proxy auth.
-  # For openai-codex proxy endpoints, api_key can be a fake OAuth JWT while
-  # headers carries the real proxy credential.
+  # For openai-codex proxy endpoints, set auth_mode: "proxy". Hermes will send
+  # a fake OAuth JWT to the Codex client while headers carries the real proxy
+  # credential.
+  # auth_mode: "proxy"
   # headers:
   #   x-api-key: "real-proxy-token"
   # user_agent: "HermesProxy/1.0"
