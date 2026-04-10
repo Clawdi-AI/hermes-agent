@@ -1,8 +1,9 @@
+import asyncio
 import json
 import queue
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Iterator
+from typing import Any, AsyncIterator, Iterator
 
 
 def utc_now_iso() -> str:
@@ -38,6 +39,15 @@ class SSEEmitter:
 
 
 class SSEStream:
+    """Thread-safe byte queue consumed by a FastAPI StreamingResponse.
+
+    Supports both sync (``__iter__``) and async (``aiter``) consumption.
+    The async form runs the blocking ``queue.get()`` in a thread pool so
+    it doesn't block the event loop, and lets the StreamingResponse
+    detect client disconnect via GeneratorExit / CancelledError — the
+    route handler can then call ``agent.interrupt()`` on its worker.
+    """
+
     def __init__(self) -> None:
         self._queue: queue.Queue[bytes | None] = queue.Queue()
 
@@ -50,6 +60,23 @@ class SSEStream:
     def __iter__(self) -> Iterator[bytes]:
         while True:
             item = self._queue.get()
+            if item is None:
+                break
+            yield item
+
+    async def aiter(self) -> AsyncIterator[bytes]:
+        """Async iteration that yields queue items without blocking the loop.
+
+        Each ``queue.get()`` is offloaded to the default thread pool via
+        ``asyncio.to_thread`` so the event loop stays responsive while the
+        worker thread pushes frames. When the client disconnects,
+        ``StreamingResponse`` closes this generator which raises
+        ``GeneratorExit`` — callers can catch that (or wrap it in a
+        try/finally) to notify the worker.
+        """
+        loop = asyncio.get_running_loop()
+        while True:
+            item = await loop.run_in_executor(None, self._queue.get)
             if item is None:
                 break
             yield item

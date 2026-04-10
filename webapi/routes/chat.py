@@ -1,4 +1,5 @@
 import json
+import logging
 import threading
 import uuid
 from typing import Annotated, Any
@@ -8,9 +9,12 @@ from fastapi.responses import StreamingResponse
 from starlette.concurrency import run_in_threadpool
 
 from hermes_state import SessionDB
+from run_agent import AIAgent
 from webapi.deps import create_agent, get_session_db, get_session_or_404, get_runtime_model
 from webapi.models.chat import ChatRequest, ChatResponse
 from webapi.sse import SSEEmitter, SSEStream
+
+logger = logging.getLogger(__name__)
 
 
 router = APIRouter(prefix="/api/sessions", tags=["chat"])
@@ -275,6 +279,16 @@ async def chat_stream(
         )
     )
 
+    # Mutable container shared between the worker thread and the async
+    # generator below. The async generator catches client disconnect
+    # (GeneratorExit / CancelledError raised by StreamingResponse) and
+    # calls agent.interrupt() on whatever reference the worker has set,
+    # which signals the running agent loop to stop cleanly at the next
+    # tool-call boundary. Without this, daemon threads would keep
+    # executing and burning model tokens long after the user's tab closed.
+    agent_ref: list[AIAgent | None] = [None]
+    worker_done = threading.Event()
+
     def worker() -> None:
         try:
             history = session_db.get_messages_as_conversation(session_id)
@@ -328,6 +342,9 @@ async def chat_stream(
                 stream_callback=stream_callback,
                 tool_progress_callback=tool_progress_callback,
             )
+            # Expose the agent to the async generator so client-disconnect
+            # handling can call agent.interrupt() on the correct instance.
+            agent_ref[0] = agent
             result = agent.run_conversation(
                 user_content,
                 conversation_history=history,
@@ -338,12 +355,39 @@ async def chat_stream(
         except Exception as exc:
             stream.put(emitter.event("error", message=str(exc)))
         finally:
+            worker_done.set()
             stream.put(emitter.event("done"))
             stream.close()
 
     threading.Thread(target=worker, daemon=True).start()
+
+    async def event_stream():
+        """Relay queued frames to StreamingResponse.
+
+        Wrapping the blocking SSEStream in an async generator lets us
+        catch client disconnect (GeneratorExit raised when
+        ``StreamingResponse`` closes the iterator) and signal the worker
+        thread's agent via ``agent.interrupt()``. Mirrors the upstream
+        aiohttp pattern at ``gateway/platforms/api_server.py:1080-1100``.
+        """
+        try:
+            async for chunk in stream.aiter():
+                yield chunk
+        except GeneratorExit:
+            # Client disconnected before the worker finished. Ask the agent
+            # to stop at the next safe boundary so we don't keep billing
+            # tokens for a stream nobody is reading.
+            _interrupt_agent(agent_ref[0], "SSE client disconnected")
+            raise
+        finally:
+            # Extra safety: if the generator exits cleanly but the worker
+            # is still running for some reason (e.g. uvicorn shutdown),
+            # try to interrupt so the thread drains.
+            if not worker_done.is_set():
+                _interrupt_agent(agent_ref[0], "Stream closed")
+
     return StreamingResponse(
-        stream,
+        event_stream(),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -351,3 +395,13 @@ async def chat_stream(
             "X-Accel-Buffering": "no",
         },
     )
+
+
+def _interrupt_agent(agent: AIAgent | None, reason: str) -> None:
+    """Safely call ``agent.interrupt(reason)`` with full exception handling."""
+    if agent is None:
+        return
+    try:
+        agent.interrupt(reason)
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("Failed to interrupt agent: %s", exc)
