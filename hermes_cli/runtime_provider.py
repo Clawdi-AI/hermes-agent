@@ -161,6 +161,20 @@ def _configured_model_headers(model_cfg: Dict[str, Any], provider: str) -> Dict[
     return headers
 
 
+def _is_codex_proxy_config(model_cfg: Dict[str, Any]) -> bool:
+    """Return True when config explicitly routes Codex through an auth proxy."""
+    cfg_provider = str(model_cfg.get("provider") or "").strip().lower()
+    auth_mode = str(model_cfg.get("auth_mode") or "").strip().lower()
+    return cfg_provider == "openai-codex" and auth_mode == "proxy"
+
+
+def _configured_codex_base_url(model_cfg: Dict[str, Any]) -> str:
+    cfg_provider = str(model_cfg.get("provider") or "").strip().lower()
+    if cfg_provider != "openai-codex":
+        return ""
+    return str(model_cfg.get("base_url") or "").strip().rstrip("/")
+
+
 def _resolve_runtime_from_pool_entry(
     *,
     provider: str,
@@ -505,15 +519,10 @@ def _resolve_explicit_runtime(
         base_url = explicit_base_url or DEFAULT_CODEX_BASE_URL
         api_key = explicit_api_key
         default_headers = _configured_model_headers(model_cfg, "openai-codex")
-        cfg_provider = str(model_cfg.get("provider") or "").strip().lower()
-        if cfg_provider == "openai-codex":
-            cfg_base_url = str(model_cfg.get("base_url") or "").strip().rstrip("/")
-            if cfg_base_url and not explicit_base_url:
-                base_url = cfg_base_url
-            cfg_api_key = str(model_cfg.get("api_key") or "").strip()
-            if cfg_api_key and not api_key:
-                api_key = cfg_api_key
-        if default_headers and not api_key:
+        cfg_base_url = _configured_codex_base_url(model_cfg)
+        if cfg_base_url and not explicit_base_url:
+            base_url = cfg_base_url
+        if _is_codex_proxy_config(model_cfg) and not api_key:
             api_key = CODEX_PROXY_FAKE_OAUTH_JWT
         last_refresh = None
         if not api_key:
@@ -527,7 +536,7 @@ def _resolve_explicit_runtime(
             "api_mode": "codex_responses",
             "base_url": base_url,
             "api_key": api_key,
-            "source": "config-proxy" if default_headers else "explicit",
+            "source": "config-proxy" if _is_codex_proxy_config(model_cfg) else "explicit",
             "last_refresh": last_refresh,
             "requested_provider": requested_provider,
         }
@@ -645,15 +654,8 @@ def resolve_runtime_provider(
 
     should_use_pool = provider != "openrouter"
     if provider == "openai-codex":
-        cfg_provider = str(model_cfg.get("provider") or "").strip().lower()
-        if cfg_provider == "openai-codex":
-            has_codex_config_override = bool(
-                str(model_cfg.get("base_url") or "").strip()
-                or str(model_cfg.get("api_key") or "").strip()
-                or _configured_model_headers(model_cfg, "openai-codex")
-            )
-            if has_codex_config_override:
-                should_use_pool = False
+        if _is_codex_proxy_config(model_cfg):
+            should_use_pool = False
     if provider == "openrouter":
         cfg_provider = str(model_cfg.get("provider") or "").strip().lower()
         cfg_base_url = str(model_cfg.get("base_url") or "").strip()
@@ -711,32 +713,19 @@ def resolve_runtime_provider(
 
     if provider == "openai-codex":
         default_headers = _configured_model_headers(model_cfg, "openai-codex")
-        cfg_provider = str(model_cfg.get("provider") or "").strip().lower()
-        cfg_base_url = ""
-        cfg_api_key = ""
-        if cfg_provider == "openai-codex":
-            cfg_base_url = str(model_cfg.get("base_url") or "").strip().rstrip("/")
-            cfg_api_key = str(model_cfg.get("api_key") or "").strip()
-        if default_headers:
+        cfg_base_url = _configured_codex_base_url(model_cfg)
+        if _is_codex_proxy_config(model_cfg):
             runtime = {
                 "provider": "openai-codex",
                 "api_mode": "codex_responses",
                 "base_url": cfg_base_url or DEFAULT_CODEX_BASE_URL,
-                "api_key": cfg_api_key or CODEX_PROXY_FAKE_OAUTH_JWT,
+                "api_key": CODEX_PROXY_FAKE_OAUTH_JWT,
                 "source": "config-proxy",
                 "requested_provider": requested_provider,
-                "default_headers": default_headers,
             }
+            if default_headers:
+                runtime["default_headers"] = default_headers
             return runtime
-        if cfg_api_key:
-            return {
-                "provider": "openai-codex",
-                "api_mode": "codex_responses",
-                "base_url": cfg_base_url or DEFAULT_CODEX_BASE_URL,
-                "api_key": cfg_api_key,
-                "source": "config",
-                "requested_provider": requested_provider,
-            }
         try:
             creds = resolve_codex_runtime_credentials()
             base_url = cfg_base_url or creds.get("base_url", "").rstrip("/")

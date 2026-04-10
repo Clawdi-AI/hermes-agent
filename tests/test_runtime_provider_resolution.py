@@ -155,6 +155,7 @@ def test_resolve_runtime_provider_codex_uses_config_proxy_overrides(monkeypatch)
         "_get_model_config",
         lambda: {
             "provider": "openai-codex",
+            "auth_mode": "proxy",
             "base_url": "https://codex-proxy.example.com/v1/",
             "headers": {"x-api-key": "real-proxy-token"},
             "user_agent": "HermesProxy/1.0",
@@ -194,6 +195,7 @@ def test_resolve_runtime_provider_codex_config_proxy_overrides_pool(monkeypatch)
         "_get_model_config",
         lambda: {
             "provider": "openai-codex",
+            "auth_mode": "proxy",
             "base_url": "https://codex-proxy.example.com/v1/",
             "headers": {"x-api-key": "real-proxy-token"},
         },
@@ -205,6 +207,37 @@ def test_resolve_runtime_provider_codex_config_proxy_overrides_pool(monkeypatch)
     assert resolved["api_key"] == rp.CODEX_PROXY_FAKE_OAUTH_JWT
     assert resolved["source"] == "config-proxy"
     assert resolved.get("credential_pool") is None
+
+
+def test_resolve_runtime_provider_codex_headers_do_not_imply_proxy(monkeypatch):
+    monkeypatch.setattr(rp, "resolve_provider", lambda *a, **k: "openai-codex")
+    monkeypatch.setattr(rp, "load_pool", lambda provider: None)
+    monkeypatch.setattr(
+        rp,
+        "_get_model_config",
+        lambda: {
+            "provider": "openai-codex",
+            "base_url": "https://codex-proxy.example.com/v1/",
+            "headers": {"x-api-key": "real-proxy-token"},
+        },
+    )
+    monkeypatch.setattr(
+        rp,
+        "resolve_codex_runtime_credentials",
+        lambda: {
+            "provider": "openai-codex",
+            "base_url": "https://chatgpt.com/backend-api/codex",
+            "api_key": "real-oauth-token",
+            "source": "hermes-auth-store",
+            "last_refresh": "2026-02-26T00:00:00Z",
+        },
+    )
+
+    resolved = rp.resolve_runtime_provider(requested="openai-codex")
+
+    assert resolved["api_key"] == "real-oauth-token"
+    assert resolved["source"] == "hermes-auth-store"
+    assert resolved.get("default_headers") is None
 
 
 def test_resolve_runtime_provider_ai_gateway(monkeypatch):
