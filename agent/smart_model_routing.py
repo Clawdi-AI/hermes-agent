@@ -112,6 +112,8 @@ def resolve_turn_route(user_message: str, routing_config: Optional[Dict[str, Any
 
     Returns a dict with model/runtime/signature/label fields.
     """
+    primary_headers = dict(primary.get("default_headers") or {})
+    primary_header_signature = tuple(sorted(primary_headers.items()))
     route = choose_cheap_model_route(user_message, routing_config)
     if not route:
         return {
@@ -124,6 +126,7 @@ def resolve_turn_route(user_message: str, routing_config: Optional[Dict[str, Any
                 "command": primary.get("command"),
                 "args": list(primary.get("args") or []),
                 "credential_pool": primary.get("credential_pool"),
+                "default_headers": primary_headers,
             },
             "label": None,
             "signature": (
@@ -133,6 +136,7 @@ def resolve_turn_route(user_message: str, routing_config: Optional[Dict[str, Any
                 primary.get("api_mode"),
                 primary.get("command"),
                 tuple(primary.get("args") or ()),
+                primary_header_signature,
             ),
         }
 
@@ -160,6 +164,7 @@ def resolve_turn_route(user_message: str, routing_config: Optional[Dict[str, Any
                 "command": primary.get("command"),
                 "args": list(primary.get("args") or []),
                 "credential_pool": primary.get("credential_pool"),
+                "default_headers": primary_headers,
             },
             "label": None,
             "signature": (
@@ -169,9 +174,11 @@ def resolve_turn_route(user_message: str, routing_config: Optional[Dict[str, Any
                 primary.get("api_mode"),
                 primary.get("command"),
                 tuple(primary.get("args") or ()),
+                primary_header_signature,
             ),
         }
 
+    runtime_headers = dict(runtime.get("default_headers") or {})
     return {
         "model": route.get("model"),
         "runtime": {
@@ -181,6 +188,7 @@ def resolve_turn_route(user_message: str, routing_config: Optional[Dict[str, Any
             "api_mode": runtime.get("api_mode"),
             "command": runtime.get("command"),
             "args": list(runtime.get("args") or []),
+            "default_headers": runtime_headers,
         },
         "label": f"smart route → {route.get('model')} ({runtime.get('provider')})",
         "signature": (
@@ -190,5 +198,6 @@ def resolve_turn_route(user_message: str, routing_config: Optional[Dict[str, Any
             runtime.get("api_mode"),
             runtime.get("command"),
             tuple(runtime.get("args") or ()),
+            tuple(sorted(runtime_headers.items())),
         ),
     }

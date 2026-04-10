@@ -1296,7 +1296,15 @@ class AIAgent:
             # Iterative summary from previous session must not bleed into new one (#2635)
             self.context_compressor._previous_summary = None
     
-    def switch_model(self, new_model, new_provider, api_key='', base_url='', api_mode=''):
+    def switch_model(
+        self,
+        new_model,
+        new_provider,
+        api_key='',
+        base_url='',
+        api_mode='',
+        default_headers=None,
+    ):
         """Switch the model/provider in-place for a live agent.
 
         Called by the /model command handlers (CLI and gateway) after
@@ -1352,6 +1360,8 @@ class AIAgent:
                 "api_key": effective_key,
                 "base_url": effective_base,
             }
+            if default_headers:
+                self._client_kwargs["default_headers"] = dict(default_headers)
             self.client = self._create_openai_client(
                 dict(self._client_kwargs),
                 reason="switch_model",
