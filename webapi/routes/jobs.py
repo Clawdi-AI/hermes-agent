@@ -11,10 +11,13 @@ returns HTTP 501 via ``_check_jobs_available``.
 
 from __future__ import annotations
 
+import logging
 import re
-from typing import Any
+from typing import Any, NoReturn
 
 from fastapi import APIRouter, HTTPException, Query, status
+
+logger = logging.getLogger(__name__)
 
 from webapi.models.jobs import (
     JobCreateRequest,
@@ -70,6 +73,23 @@ def _check_available() -> None:
         )
 
 
+def _internal_error(operation: str, exc: Exception) -> NoReturn:
+    """Log the real exception (with stack trace) and raise a generic
+    500 to the client.
+
+    The previous implementation raised ``HTTPException(500, str(exc))``
+    which echoes raw exception messages — file system paths, SQL errors,
+    stack-trace fragments, tempfile names — back to the browser. This
+    helper keeps the detail on the server logs where it belongs and
+    gives the client a stable, operation-scoped message.
+    """
+    logger.exception("[webapi.jobs] %s failed", operation)
+    raise HTTPException(
+        status_code=500,
+        detail=f"Internal error during {operation}",
+    ) from exc
+
+
 def _validate_job_id(job_id: str) -> None:
     if not _JOB_ID_RE.fullmatch(job_id):
         raise HTTPException(
@@ -92,7 +112,7 @@ async def list_jobs(
         jobs = _cron_list(include_disabled=include_disabled)  # type: ignore[misc]
         return JobsListResponse(jobs=jobs)
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        _internal_error("list_jobs", exc)
 
 
 @router.post("", response_model=JobResponse)
@@ -147,7 +167,7 @@ async def create_job(payload: JobCreateRequest) -> JobResponse:
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        _internal_error("create_job", exc)
 
 
 @router.get("/{job_id}", response_model=JobResponse)
@@ -157,7 +177,7 @@ async def get_job(job_id: str) -> JobResponse:
     try:
         job = _cron_get(job_id)  # type: ignore[misc]
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        _internal_error("get_job", exc)
     if not job:
         raise HTTPException(status_code=404, detail=f"Job '{job_id}' not found")
     return JobResponse(job=job)
@@ -188,7 +208,7 @@ async def update_job(job_id: str, payload: JobUpdateRequest) -> JobResponse:
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        _internal_error("update_job", exc)
     if not job:
         raise HTTPException(status_code=404, detail=f"Job '{job_id}' not found")
     return JobResponse(job=job)
@@ -201,7 +221,7 @@ async def delete_job(job_id: str) -> JobDeleteResponse:
     try:
         success = _cron_remove(job_id)  # type: ignore[misc]
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        _internal_error("delete_job", exc)
     if not success:
         raise HTTPException(status_code=404, detail=f"Job '{job_id}' not found")
     return JobDeleteResponse(ok=True, job_id=job_id)
@@ -214,7 +234,7 @@ async def pause_job(job_id: str) -> JobResponse:
     try:
         job = _cron_pause(job_id)  # type: ignore[misc]
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        _internal_error("pause_job", exc)
     if not job:
         raise HTTPException(status_code=404, detail=f"Job '{job_id}' not found")
     return JobResponse(job=job)
@@ -227,7 +247,7 @@ async def resume_job(job_id: str) -> JobResponse:
     try:
         job = _cron_resume(job_id)  # type: ignore[misc]
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        _internal_error("resume_job", exc)
     if not job:
         raise HTTPException(status_code=404, detail=f"Job '{job_id}' not found")
     return JobResponse(job=job)
@@ -241,7 +261,7 @@ async def run_job_now(job_id: str) -> JobResponse:
     try:
         job = _cron_trigger(job_id)  # type: ignore[misc]
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        _internal_error("run_job_now", exc)
     if not job:
         raise HTTPException(status_code=404, detail=f"Job '{job_id}' not found")
     return JobResponse(job=job)

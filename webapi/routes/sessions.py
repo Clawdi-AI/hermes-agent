@@ -127,17 +127,24 @@ async def get_session_messages(
     """
     if not session_db.get_session(session_id):
         raise HTTPException(status_code=404, detail=f"Session '{session_id}' not found")
-    messages = session_db.get_messages(session_id)
-    total = len(messages)
 
-    # Slice according to pagination params.
+    # Total always reflects the full session length so chat UIs can
+    # render "X of N" indicators — done as a cheap COUNT(*) rather than
+    # loading every message.
+    total = session_db.count_messages(session_id)
+
     if limit == 0:
-        selected = messages
-    elif tail:
-        start = max(0, total - limit)
-        selected = messages[start : start + limit]
+        # Legacy behavior: unbounded load. Only used by callers that
+        # explicitly want the full transcript (e.g. cron job runners,
+        # export flows). Chat UIs should always set a limit.
+        selected = session_db.get_messages(session_id)
     else:
-        selected = messages[offset : offset + limit]
+        selected = session_db.get_messages_page(
+            session_id,
+            limit=limit,
+            offset=offset,
+            tail=tail,
+        )
 
     return MessageListResponse(
         items=[_coerce_message(item) for item in selected],

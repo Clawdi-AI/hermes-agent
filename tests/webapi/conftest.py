@@ -78,6 +78,16 @@ class _FakeSessionDB:
     def get_messages(self, sid):
         return _messages_store.get(sid, [])
 
+    def count_messages(self, sid):
+        return len(_messages_store.get(sid, []))
+
+    def get_messages_page(self, sid, *, limit, offset=0, tail=False):
+        msgs = _messages_store.get(sid, [])
+        if tail:
+            start = max(0, len(msgs) - limit)
+            return msgs[start : start + limit]
+        return msgs[offset : offset + limit]
+
     def get_messages_as_conversation(self, sid):
         return _messages_store.get(sid, [])
 
@@ -212,21 +222,57 @@ def _install_stubs() -> None:
         }
     )
 
+    # Fake cron.jobs backed by an in-memory dict so pause/resume/run/
+    # delete can round-trip through the route handlers end-to-end.
+    _jobs_store: dict[str, dict] = {}
+
+    def _fake_create_job(**k):
+        job_id = "abcdef012345"
+        job = {
+            "id": job_id,
+            "name": k.get("name"),
+            "prompt": k.get("prompt"),
+            "schedule": {"kind": "cron", "display": k.get("schedule")},
+            "schedule_display": k.get("schedule"),
+            "enabled": True,
+            "state": "scheduled",
+        }
+        _jobs_store[job_id] = job
+        return job
+
+    def _fake_update_job(job_id, updates):
+        job = _jobs_store.get(job_id)
+        if job is None:
+            return None
+        job.update(updates)
+        return job
+
+    def _fake_pause_job(job_id):
+        return _fake_update_job(
+            job_id, {"state": "paused", "enabled": False}
+        )
+
+    def _fake_resume_job(job_id):
+        return _fake_update_job(
+            job_id, {"state": "scheduled", "enabled": True}
+        )
+
+    def _fake_trigger_job(job_id):
+        return _fake_update_job(job_id, {"last_run_at": "2026-01-01T00:00:00"})
+
+    def _fake_remove_job(job_id):
+        return _jobs_store.pop(job_id, None) is not None
+
     cj = sys.modules["cron.jobs"]
-    cj.list_jobs = lambda include_disabled=False: []  # type: ignore[attr-defined]
-    cj.get_job = lambda job_id: None  # type: ignore[attr-defined]
-    cj.create_job = lambda **k: {  # type: ignore[attr-defined]
-        "id": "abcdef012345",
-        "name": k.get("name"),
-        "schedule_display": k.get("schedule"),
-        "enabled": True,
-        "state": "scheduled",
-    }
-    cj.update_job = lambda job_id, updates: None  # type: ignore[attr-defined]
-    cj.remove_job = lambda job_id: False  # type: ignore[attr-defined]
-    cj.pause_job = lambda job_id: None  # type: ignore[attr-defined]
-    cj.resume_job = lambda job_id: None  # type: ignore[attr-defined]
-    cj.trigger_job = lambda job_id: None  # type: ignore[attr-defined]
+    cj.list_jobs = lambda include_disabled=False: list(_jobs_store.values())  # type: ignore[attr-defined]
+    cj.get_job = lambda job_id: _jobs_store.get(job_id)  # type: ignore[attr-defined]
+    cj.create_job = _fake_create_job  # type: ignore[attr-defined]
+    cj.update_job = _fake_update_job  # type: ignore[attr-defined]
+    cj.remove_job = _fake_remove_job  # type: ignore[attr-defined]
+    cj.pause_job = _fake_pause_job  # type: ignore[attr-defined]
+    cj.resume_job = _fake_resume_job  # type: ignore[attr-defined]
+    cj.trigger_job = _fake_trigger_job  # type: ignore[attr-defined]
+    cj._jobs_store = _jobs_store  # type: ignore[attr-defined]
 
     sys.modules["gateway.run"]._resolve_model = lambda: "stub"  # type: ignore[attr-defined]
     sys.modules["gateway.run"]._resolve_runtime_agent_kwargs = lambda: {  # type: ignore[attr-defined]

@@ -282,3 +282,179 @@ def test_auth_enabled_correct_bearer_accepted():
         "/api/sessions", headers={"Authorization": "Bearer secret"}
     )
     assert resp.status_code == 200
+
+
+def test_auth_enabled_rejects_every_protected_route():
+    """Every protected router must return 401 when a bearer is required
+    but missing — a guard against a future router being added without
+    the ``Depends(verify_bearer_token)`` annotation in app.py.
+    """
+    client = _build_client(token="secret")
+    protected = [
+        ("GET", "/v1/models"),
+        ("GET", "/api/sessions"),
+        ("GET", "/api/memory"),
+        ("GET", "/api/config"),
+        ("GET", "/api/skills"),
+        ("GET", "/api/skills/categories"),
+        ("GET", "/api/jobs"),
+    ]
+    for method, path in protected:
+        resp = client.request(method, path)
+        assert resp.status_code == 401, f"{method} {path} returned {resp.status_code}, expected 401"
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Tool success/failure classification (chat.py::_tool_result_failed)
+# ─────────────────────────────────────────────────────────────────────
+
+
+def test_tool_result_failed_only_on_structured_success_false():
+    """Regression test for the old substring match that mis-classified
+    legitimate tool output as a failure.
+    """
+    from webapi.routes.chat import _tool_result_failed
+
+    # Structured JSON with explicit success:false → failed
+    assert _tool_result_failed('{"success": false, "error": "nope"}') is True
+    # Structured JSON with success:true → completed
+    assert _tool_result_failed('{"success": true, "result": [1, 2, 3]}') is False
+    # Plain text containing the word "error" → completed (false positive avoided)
+    assert _tool_result_failed("grep: /etc/hosts: No such file or error") is False
+    assert _tool_result_failed("Test results: 0 failed, 42 passed") is False
+    assert _tool_result_failed("found 3 errors in the log") is False
+    # Empty / None / non-string
+    assert _tool_result_failed("") is False
+    assert _tool_result_failed("   ") is False
+    assert _tool_result_failed(None) is False
+    assert _tool_result_failed(42) is False
+    # Malformed JSON that starts with { → treat as plain text, success
+    assert _tool_result_failed("{not valid json") is False
+    # JSON without success field → success
+    assert _tool_result_failed('{"result": "ok"}') is False
+    # JSON array → success (only dict with success:false triggers failure)
+    assert _tool_result_failed('[{"success": false}]') is False
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Cron job full lifecycle (pause/resume/run/delete)
+# ─────────────────────────────────────────────────────────────────────
+
+
+def test_cron_job_pause_resume_run_delete():
+    """Walk a fresh job through every mutation endpoint and confirm
+    each returns 200 with a JobResponse shape.
+    """
+    client = _build_client(token=None)
+    created = client.post(
+        "/api/jobs",
+        json={
+            "name": "lifecycle job",
+            "schedule": "0 9 * * *",
+            "prompt": "hi",
+        },
+    )
+    assert created.status_code == 200
+    job_id = created.json()["job"]["id"]
+
+    # Pause
+    paused = client.post(f"/api/jobs/{job_id}/pause")
+    assert paused.status_code == 200
+    assert "job" in paused.json()
+
+    # Resume
+    resumed = client.post(f"/api/jobs/{job_id}/resume")
+    assert resumed.status_code == 200
+
+    # Run immediately
+    ran = client.post(f"/api/jobs/{job_id}/run")
+    assert ran.status_code == 200
+
+    # Update with the newly-added model/provider/base_url/script fields
+    updated = client.patch(
+        f"/api/jobs/{job_id}",
+        json={
+            "model": "claude-sonnet-4-5",
+            "provider": "anthropic",
+            "base_url": "https://api.anthropic.com",
+            "script": "/tmp/context.py",
+        },
+    )
+    assert updated.status_code == 200
+
+    # Delete
+    deleted = client.delete(f"/api/jobs/{job_id}")
+    assert deleted.status_code == 200
+    assert deleted.json()["ok"] is True
+
+
+def test_cron_invalid_job_id_rejected():
+    """Job IDs must be 12 hex chars — anything else is a client error
+    before hitting the cron subsystem.
+    """
+    client = _build_client(token=None)
+    # Too short — not matched by the {12 hex} regex
+    assert client.get("/api/jobs/abc").status_code == 400
+    # Right length but non-hex chars
+    assert client.get("/api/jobs/zzzzzzzzzzzz").status_code == 400
+    # Right length with mixed case (regex only allows lowercase hex)
+    assert client.get("/api/jobs/ABCDEF012345").status_code == 400
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Pagination edge cases (SQL LIMIT/OFFSET pushdown)
+# ─────────────────────────────────────────────────────────────────────
+
+
+def test_messages_pagination_bounds():
+    """Exercise the limit/offset/tail query params against the fake
+    session DB. Real SQL pushdown is covered by the hermes_state unit
+    suite; this is a smoke test that the route plumbing works.
+    """
+    client = _build_client(token=None)
+    sid = client.post("/api/sessions", json={"title": "p"}).json()["session"]["id"]
+
+    # limit=0 → legacy unbounded path
+    body = client.get(f"/api/sessions/{sid}/messages?limit=0").json()
+    assert "items" in body
+    assert body["total"] == 0  # fake db has no messages
+
+    # limit=1 offset=0 → pushes to get_messages_page(limit=1, offset=0)
+    body = client.get(f"/api/sessions/{sid}/messages?limit=1").json()
+    assert body["items"] == []
+
+    # tail=true → get_messages_page(limit=N, tail=True)
+    body = client.get(f"/api/sessions/{sid}/messages?limit=10&tail=true").json()
+    assert body["items"] == []
+
+    # offset without limit → server still honors limit=0 (legacy),
+    # offset ignored
+    body = client.get(f"/api/sessions/{sid}/messages?offset=100").json()
+    assert body["items"] == []
+
+    # limit too large → 422 from the Query(le=1000) guard
+    assert (
+        client.get(f"/api/sessions/{sid}/messages?limit=9999").status_code == 422
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────
+# JobUpdateRequest new fields (model/provider/base_url/script)
+# ─────────────────────────────────────────────────────────────────────
+
+
+def test_job_update_accepts_all_create_fields():
+    """Mirror of JobCreateRequest (minus origin). Guards against a
+    future drift where JobCreateRequest grows a field that
+    JobUpdateRequest forgets to mirror.
+    """
+    from webapi.models.jobs import JobCreateRequest, JobUpdateRequest
+
+    create_fields = set(JobCreateRequest.model_fields.keys())
+    update_fields = set(JobUpdateRequest.model_fields.keys())
+    # Update must at minimum support every create field, plus `enabled`.
+    missing = create_fields - update_fields
+    assert missing == set(), (
+        f"JobUpdateRequest is missing fields present in JobCreateRequest: {missing}"
+    )
+    assert "enabled" in update_fields

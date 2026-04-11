@@ -29,6 +29,8 @@ class JobUpdateRequest(WebAPIModel):
 
     Only the fields listed here are accepted — any other keys are ignored
     to prevent clients from injecting arbitrary state onto persisted jobs.
+    Mirror of the fields in :class:`JobCreateRequest` (everything except
+    ``origin``, which is set by the creation path and never edited).
     """
 
     name: str | None = None
@@ -39,6 +41,10 @@ class JobUpdateRequest(WebAPIModel):
     skill: str | None = None
     repeat: int | None = None
     enabled: bool | None = None
+    model: str | None = None
+    provider: str | None = None
+    base_url: str | None = None
+    script: str | None = None
 
 
 class JobRepeat(WebAPIModel):

@@ -99,6 +99,36 @@ def _result_preview(content: Any, limit: int = 4000) -> str:
     return text[:limit] + ("..." if len(text) > limit else "")
 
 
+def _tool_result_failed(content: Any) -> bool:
+    """Return True iff a tool-role message is an explicit structured
+    failure.
+
+    The previous implementation used a substring match on "error" or
+    "failed", which mis-classified every legitimate tool result that
+    happened to contain either word — grep hits, unit-test summaries
+    like "0 failed", search output referencing error logs, git diffs
+    of old tracebacks, and so on.
+
+    The correct signal is the structured JSON envelope Hermes tools
+    use: ``{"success": False, "error": "..."}``. Anything that isn't
+    a JSON object with an explicit ``success: false`` key is treated
+    as a success so that plain-text tool output (the common case) is
+    never mislabeled.
+    """
+    if not isinstance(content, str):
+        return False
+    text = content.strip()
+    if not text or text[0] not in "{[":
+        return False
+    try:
+        parsed = json.loads(text)
+    except (TypeError, json.JSONDecodeError):
+        return False
+    if isinstance(parsed, dict):
+        return parsed.get("success") is False
+    return False
+
+
 def _emit_post_run_events(emitter: SSEEmitter, stream: SSEStream, result: dict[str, Any], assistant_message_id: str) -> None:
     messages = result.get("messages") or []
     tools = _tool_map(messages)
@@ -116,8 +146,7 @@ def _emit_post_run_events(emitter: SSEEmitter, stream: SSEStream, result: dict[s
             "result_preview": _result_preview(message.get("content")),
         }
         content = message.get("content") or ""
-        lower = content.lower() if isinstance(content, str) else ""
-        failed = "error" in lower or "failed" in lower
+        failed = _tool_result_failed(content)
         stream.put(emitter.event("tool.failed" if failed else "tool.completed", **payload))
 
         if not failed and tool_name == "memory":

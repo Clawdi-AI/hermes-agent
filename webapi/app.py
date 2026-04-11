@@ -32,12 +32,21 @@ def create_app() -> FastAPI:
         version="0.1.0",
     )
 
+    # CORS:
+    # - credentials=False because webapi uses a bearer header, never a
+    #   cookie. `allow_credentials=True` + `allow_origins=["*"]` is an
+    #   invalid combination that browsers reject on preflight, and we
+    #   don't need cookie-scoped credentials anyway.
+    # - headers enumerated explicitly: "Authorization" (bearer) and
+    #   "Content-Type" (JSON body). Wildcard headers with credentials
+    #   is also spec-invalid.
+    # - methods enumerated to the set the routes actually handle.
     app.add_middleware(
         CORSMiddleware,
         allow_origins=_get_cors_origins(),
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
+        allow_credentials=False,
+        allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+        allow_headers=["Authorization", "Content-Type"],
     )
 
     register_error_handlers(app)

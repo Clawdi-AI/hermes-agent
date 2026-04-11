@@ -938,16 +938,78 @@ class SessionDB:
                 (session_id,),
             )
             rows = cursor.fetchall()
-        result = []
-        for row in rows:
-            msg = dict(row)
-            if msg.get("tool_calls"):
-                try:
-                    msg["tool_calls"] = json.loads(msg["tool_calls"])
-                except (json.JSONDecodeError, TypeError):
-                    pass
-            result.append(msg)
-        return result
+        return [self._hydrate_message_row(row) for row in rows]
+
+    def count_messages(self, session_id: str) -> int:
+        """Cheap message-count query for paginated transcript views."""
+        with self._lock:
+            cursor = self._conn.execute(
+                "SELECT COUNT(*) AS n FROM messages WHERE session_id = ?",
+                (session_id,),
+            )
+            row = cursor.fetchone()
+        return int(row["n"]) if row is not None else 0
+
+    def get_messages_page(
+        self,
+        session_id: str,
+        *,
+        limit: int,
+        offset: int = 0,
+        tail: bool = False,
+    ) -> List[Dict[str, Any]]:
+        """Fetch a page of messages via SQL ``LIMIT``/``OFFSET``.
+
+        Chronological order (oldest first) is always returned. Semantics:
+
+        - ``tail=False``: skip ``offset`` messages from the head, take
+          the next ``limit``. Standard pagination.
+        - ``tail=True``: return the LAST ``limit`` messages, ignoring
+          ``offset``. Implemented via ``ORDER BY DESC`` then reversing
+          in Python so the client still sees chronological order. This
+          is how chat UIs open a session: show the most recent N
+          messages without scanning the whole history.
+
+        Both variants push the slicing to SQLite so a 10k-message
+        session costs ``O(limit)`` rows loaded, not ``O(total)``.
+
+        ``limit`` must be > 0 — use ``get_messages`` for the
+        "load everything" case.
+        """
+        if limit <= 0:
+            raise ValueError("limit must be positive; use get_messages() for unbounded reads")
+        if offset < 0:
+            raise ValueError("offset must be non-negative")
+
+        with self._lock:
+            if tail:
+                cursor = self._conn.execute(
+                    "SELECT * FROM messages WHERE session_id = ? "
+                    "ORDER BY timestamp DESC, id DESC LIMIT ?",
+                    (session_id, limit),
+                )
+                rows = list(reversed(cursor.fetchall()))
+            else:
+                cursor = self._conn.execute(
+                    "SELECT * FROM messages WHERE session_id = ? "
+                    "ORDER BY timestamp, id LIMIT ? OFFSET ?",
+                    (session_id, limit, offset),
+                )
+                rows = cursor.fetchall()
+        return [self._hydrate_message_row(row) for row in rows]
+
+    @staticmethod
+    def _hydrate_message_row(row: Any) -> Dict[str, Any]:
+        """Turn a raw sqlite Row into the dict shape callers expect,
+        parsing ``tool_calls`` JSON when present.
+        """
+        msg = dict(row)
+        if msg.get("tool_calls"):
+            try:
+                msg["tool_calls"] = json.loads(msg["tool_calls"])
+            except (json.JSONDecodeError, TypeError):
+                pass
+        return msg
 
     def get_messages_as_conversation(self, session_id: str) -> List[Dict[str, Any]]:
         """
