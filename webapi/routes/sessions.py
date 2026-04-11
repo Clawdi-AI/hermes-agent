@@ -272,6 +272,16 @@ async def delete_session(
     return SessionDeleteResponse(session_id=session_id)
 
 
+# Maximum attempts to allocate a unique fork title. Each attempt is
+# an independent ``get_next_title_in_lineage`` read plus a
+# ``set_session_title`` write that races the unique-title constraint;
+# collisions are rare even at a few concurrent forks, and 5 retries
+# effectively guarantees success. After 5 we give up and raise a
+# ``RuntimeError`` so the server returns 500 — the client can't
+# resolve this by retrying (they didn't supply the title).
+_FORK_TITLE_MAX_RETRIES = 5
+
+
 def _fork_session_sync(
     *,
     session_db: SessionDB,
@@ -283,13 +293,23 @@ def _fork_session_sync(
     O(thousands) of synchronous SQLite writes — running this from an
     ``async def`` directly would monopolize the event loop for the
     entire fork. Returns ``None`` if the source session is missing.
+
+    Title allocation race
+    ─────────────────────
+    ``get_next_title_in_lineage`` reads the current max suffix under
+    a brief lock and releases it before the caller commits with
+    ``set_session_title``. Two concurrent forks of the same parent
+    can therefore pick identical titles — the second ``set`` will
+    hit the unique-title constraint and raise ``ValueError``. Retry
+    the allocate+commit inside ``_FORK_TITLE_MAX_RETRIES`` attempts
+    because the title is SERVER-generated, not client-supplied: the
+    caller has no way to resolve this by retrying on their end.
     """
     original = session_db.export_session(session_id)
     if not original:
         return None
 
     fork_id = new_session_id()
-    fork_title = session_db.get_next_title_in_lineage(original.get("title") or "New Chat")
     model_config = original.get("model_config")
     if isinstance(model_config, str) and model_config:
         try:
@@ -306,7 +326,27 @@ def _fork_session_sync(
         user_id=original.get("user_id"),
         parent_session_id=session_id,
     )
-    session_db.set_session_title(fork_id, fork_title)
+
+    # Retry loop for the generate+commit race (see docstring).
+    base_title = original.get("title") or "New Chat"
+    last_err: Exception | None = None
+    for _ in range(_FORK_TITLE_MAX_RETRIES):
+        fork_title = session_db.get_next_title_in_lineage(base_title)
+        try:
+            session_db.set_session_title(fork_id, fork_title)
+            break
+        except ValueError as exc:
+            last_err = exc
+            continue
+    else:
+        # Exhausted retries — under sustained concurrent-fork
+        # contention. The session row already exists but has no
+        # title; leave it so an operator can inspect the state, and
+        # surface a 500 to the client.
+        raise RuntimeError(
+            f"could not allocate unique fork title after "
+            f"{_FORK_TITLE_MAX_RETRIES} attempts: {last_err}"
+        )
 
     for message in original.get("messages", []):
         session_db.append_message(
@@ -327,17 +367,14 @@ async def fork_session(
     session_id: str,
     session_db: Annotated[SessionDB, Depends(get_session_db)],
 ) -> ForkSessionResponse:
-    # ``_fork_session_sync`` allocates a unique fork title via
-    # ``get_next_title_in_lineage`` and then commits it via
-    # ``set_session_title``. The latter raises ``ValueError`` on a
-    # concurrent collision (two forks of the same parent racing),
-    # which we surface as a 409 so the client can retry.
-    try:
-        forked = await run_in_threadpool(
-            _fork_session_sync, session_db=session_db, session_id=session_id
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    # Title allocation collisions are retried inside
+    # ``_fork_session_sync``; if we reach this catch, all retries
+    # were exhausted and the unrecoverable RuntimeError propagates
+    # to the global 500 handler. The client cannot resolve this by
+    # retrying on their end — that's why it's not a 409.
+    forked = await run_in_threadpool(
+        _fork_session_sync, session_db=session_db, session_id=session_id
+    )
     if forked is None:
         raise HTTPException(status_code=404, detail=f"Session '{session_id}' not found")
     return ForkSessionResponse(session=_coerce_session(forked), forked_from=session_id)

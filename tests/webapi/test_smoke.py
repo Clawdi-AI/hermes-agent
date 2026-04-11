@@ -757,21 +757,58 @@ def test_create_session_title_collision_returns_400(monkeypatch):
     monkeypatch.setattr(sessions_route, "_create_session_sync", original)
 
 
-def test_fork_session_title_collision_returns_409(monkeypatch):
-    """Forking twice in a tight race can hit a title collision in
-    ``set_session_title``. The route must surface that as 409, not 500.
+def test_fork_session_title_collision_retries_successfully(monkeypatch):
+    """Happy path for the retry loop: the first ``set_session_title``
+    raises ValueError, the second succeeds. The route must return
+    200 and the transient collision must be invisible to the client.
     """
     client = _build_unsafe_client(token=None)
     source = client.post("/api/sessions", json={"title": "parent"})
     sid = source.json()["session"]["id"]
 
-    from webapi.routes import sessions as sessions_route
+    import sys
+    import webapi.routes.sessions as sessions_route
 
-    def _collide(*, session_db, session_id):
-        raise ValueError("Title 'parent (fork 1)' is already in use")
+    # Patch ``set_session_title`` on the fake SessionDB to fail on the
+    # FIRST call and succeed on subsequent calls, simulating a
+    # transient race against another concurrent fork.
+    fake_db_cls = sys.modules["hermes_state"].SessionDB
+    original_set = fake_db_cls.set_session_title
+    call_count = {"n": 0}
 
-    monkeypatch.setattr(sessions_route, "_fork_session_sync", _collide)
+    def _flaky_set(self, session_id, title):
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            raise ValueError(f"Title '{title}' is already in use")
+        return original_set(self, session_id, title)
+
+    monkeypatch.setattr(fake_db_cls, "set_session_title", _flaky_set)
 
     resp = client.post(f"/api/sessions/{sid}/fork")
-    assert resp.status_code == 409, resp.text
-    assert "already in use" in resp.json()["error"]["message"]
+    assert resp.status_code == 200, resp.text
+    assert call_count["n"] >= 2  # proves retry fired
+
+
+def test_fork_session_title_exhausted_retries_returns_500(monkeypatch):
+    """Unhappy path: set_session_title raises ValueError every time.
+    After ``_FORK_TITLE_MAX_RETRIES`` attempts the route must surface
+    a 500 (not a 409) because the title is server-generated — the
+    client cannot resolve this by retrying.
+    """
+    client = _build_unsafe_client(token=None)
+    source = client.post("/api/sessions", json={"title": "parent"})
+    sid = source.json()["session"]["id"]
+
+    import sys
+    fake_db_cls = sys.modules["hermes_state"].SessionDB
+
+    def _always_collide(self, session_id, title):
+        raise ValueError(f"Title '{title}' is already in use")
+
+    monkeypatch.setattr(fake_db_cls, "set_session_title", _always_collide)
+
+    resp = client.post(f"/api/sessions/{sid}/fork")
+    assert resp.status_code == 500, resp.text
+    # Opaque error from the global handler — do NOT leak the raw
+    # collision text to the browser.
+    assert resp.json()["error"]["message"] == "Internal server error"
