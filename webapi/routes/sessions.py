@@ -91,9 +91,16 @@ async def create_session(
     payload: SessionCreateRequest,
     session_db: Annotated[SessionDB, Depends(get_session_db)],
 ) -> SessionDetailResponse:
-    session = await run_in_threadpool(
-        _create_session_sync, session_db=session_db, payload=payload
-    )
+    # ``_create_session_sync`` calls ``set_session_title`` internally,
+    # which raises ``ValueError`` on a title collision (another
+    # session already owns that title). Surface it as a 400 — same
+    # contract as ``patch_session``.
+    try:
+        session = await run_in_threadpool(
+            _create_session_sync, session_db=session_db, payload=payload
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     return SessionDetailResponse(session=_coerce_session(session))
 
 
@@ -320,9 +327,17 @@ async def fork_session(
     session_id: str,
     session_db: Annotated[SessionDB, Depends(get_session_db)],
 ) -> ForkSessionResponse:
-    forked = await run_in_threadpool(
-        _fork_session_sync, session_db=session_db, session_id=session_id
-    )
+    # ``_fork_session_sync`` allocates a unique fork title via
+    # ``get_next_title_in_lineage`` and then commits it via
+    # ``set_session_title``. The latter raises ``ValueError`` on a
+    # concurrent collision (two forks of the same parent racing),
+    # which we surface as a 409 so the client can retry.
+    try:
+        forked = await run_in_threadpool(
+            _fork_session_sync, session_db=session_db, session_id=session_id
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     if forked is None:
         raise HTTPException(status_code=404, detail=f"Session '{session_id}' not found")
     return ForkSessionResponse(session=_coerce_session(forked), forked_from=session_id)

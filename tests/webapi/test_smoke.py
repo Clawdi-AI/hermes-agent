@@ -717,3 +717,61 @@ def test_main_default_port_matches_controller():
     from webapi import __main__ as webapi_main
 
     assert webapi_main.DEFAULT_PORT == 8643
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Session title ValueError propagation (round 7 regression)
+# ─────────────────────────────────────────────────────────────────────
+#
+# After wrapping SessionDB calls in `run_in_threadpool` (round 6),
+# `ValueError` raised inside `set_session_title` (title collision)
+# and similar no longer automatically surfaces as a 400 — the route
+# handler must catch it explicitly. These tests pin the contract.
+
+
+def test_create_session_title_collision_returns_400(monkeypatch):
+    """create_session bundles ensure_session_title + create_session +
+    set_session_title inside one threadpool hop. If ``set_session_title``
+    raises ``ValueError`` the route must translate to 400, not 500.
+    """
+    client = _build_unsafe_client(token=None)
+    # First session takes the title.
+    first = client.post("/api/sessions", json={"title": "unique-title-1"})
+    assert first.status_code == 201
+
+    # Force the second call to raise ValueError on title-set.
+    from webapi.routes import sessions as sessions_route
+
+    original = sessions_route._create_session_sync
+
+    def _collide(*, session_db, payload):
+        raise ValueError(f"Title '{payload.title}' is already in use")
+
+    monkeypatch.setattr(sessions_route, "_create_session_sync", _collide)
+
+    conflict = client.post("/api/sessions", json={"title": "unique-title-1"})
+    assert conflict.status_code == 400, conflict.text
+    assert "already in use" in conflict.json()["error"]["message"]
+
+    # Sanity: put it back and the route works again.
+    monkeypatch.setattr(sessions_route, "_create_session_sync", original)
+
+
+def test_fork_session_title_collision_returns_409(monkeypatch):
+    """Forking twice in a tight race can hit a title collision in
+    ``set_session_title``. The route must surface that as 409, not 500.
+    """
+    client = _build_unsafe_client(token=None)
+    source = client.post("/api/sessions", json={"title": "parent"})
+    sid = source.json()["session"]["id"]
+
+    from webapi.routes import sessions as sessions_route
+
+    def _collide(*, session_db, session_id):
+        raise ValueError("Title 'parent (fork 1)' is already in use")
+
+    monkeypatch.setattr(sessions_route, "_fork_session_sync", _collide)
+
+    resp = client.post(f"/api/sessions/{sid}/fork")
+    assert resp.status_code == 409, resp.text
+    assert "already in use" in resp.json()["error"]["message"]
