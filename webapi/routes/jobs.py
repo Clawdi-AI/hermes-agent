@@ -41,6 +41,7 @@ try:
         create_job as _cron_create,
         get_job as _cron_get,
         list_jobs as _cron_list,
+        parse_schedule as _cron_parse_schedule,
         pause_job as _cron_pause,
         remove_job as _cron_remove,
         resume_job as _cron_resume,
@@ -58,6 +59,7 @@ except ImportError:  # pragma: no cover - optional dependency
     _cron_pause = None  # type: ignore[assignment]
     _cron_resume = None  # type: ignore[assignment]
     _cron_trigger = None  # type: ignore[assignment]
+    _cron_parse_schedule = None  # type: ignore[assignment]
 
 
 _JOB_ID_RE = re.compile(r"[a-f0-9]{12}")
@@ -202,6 +204,20 @@ async def update_job(job_id: str, payload: JobUpdateRequest) -> JobResponse:
             status_code=400,
             detail=f"Prompt must be ≤ {_MAX_PROMPT_LENGTH} characters",
         )
+
+    # `cron.jobs.update_job` expects ``updates["schedule"]`` to be an
+    # already-parsed dict (its merge path calls `.get("display", ...)`
+    # on it). The wire-level contract is a string though, matching
+    # `JobCreateRequest.schedule`, so we parse it here before handing
+    # off. ``parse_schedule`` raises ValueError on invalid input which
+    # we surface as a 400.
+    if "schedule" in sanitized and isinstance(sanitized["schedule"], str):
+        try:
+            sanitized["schedule"] = _cron_parse_schedule(  # type: ignore[misc]
+                sanitized["schedule"].strip()
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     try:
         job = _cron_update(job_id, sanitized)  # type: ignore[misc]

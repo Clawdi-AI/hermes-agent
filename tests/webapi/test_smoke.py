@@ -309,31 +309,56 @@ def test_auth_enabled_rejects_every_protected_route():
 # ─────────────────────────────────────────────────────────────────────
 
 
-def test_tool_result_failed_only_on_structured_success_false():
-    """Regression test for the old substring match that mis-classified
-    legitimate tool output as a failure.
+def test_tool_result_failed_classification():
+    """Regression tests for the tool success/failure classifier.
+
+    Covers both the original substring-match false positives and the
+    second-pass oversight where tools that emit plain ``{"error":
+    "..."}`` (without a ``success`` field) were treated as success.
     """
     from webapi.routes.chat import _tool_result_failed
 
-    # Structured JSON with explicit success:false → failed
+    # --- structured envelope with explicit success ---
+    # success:false → failed
     assert _tool_result_failed('{"success": false, "error": "nope"}') is True
-    # Structured JSON with success:true → completed
-    assert _tool_result_failed('{"success": true, "result": [1, 2, 3]}') is False
-    # Plain text containing the word "error" → completed (false positive avoided)
+    # success:true with an "error" key inside a payload → completed
+    assert _tool_result_failed(
+        '{"success": true, "result": {"error_count": 3}}'
+    ) is False
+
+    # --- idiomatic {"error": "..."} without success field ---
+    # delegate_tool / file_tools / registry convention
+    assert _tool_result_failed('{"error": "file not found"}') is True
+    assert _tool_result_failed('{"error": "permission denied", "code": 13}') is True
+    # Nested-dict error (some tools return structured error objects)
+    assert _tool_result_failed(
+        '{"error": {"kind": "timeout", "after_ms": 5000}}'
+    ) is True
+    # Empty/null error value → NOT a failure (tool said "no error")
+    assert _tool_result_failed('{"error": ""}') is False
+    assert _tool_result_failed('{"error": null}') is False
+
+    # --- plain text output (common case) ---
+    # Containing the word "error" → completed (false positive avoided)
     assert _tool_result_failed("grep: /etc/hosts: No such file or error") is False
     assert _tool_result_failed("Test results: 0 failed, 42 passed") is False
     assert _tool_result_failed("found 3 errors in the log") is False
-    # Empty / None / non-string
+    assert _tool_result_failed("Error: this looks scary but isn't JSON") is False
+
+    # --- edge cases ---
     assert _tool_result_failed("") is False
     assert _tool_result_failed("   ") is False
     assert _tool_result_failed(None) is False
     assert _tool_result_failed(42) is False
-    # Malformed JSON that starts with { → treat as plain text, success
+    assert _tool_result_failed({"error": "not a string"}) is False  # non-string
+    # Malformed JSON starting with { → treat as plain text, success
     assert _tool_result_failed("{not valid json") is False
-    # JSON without success field → success
-    assert _tool_result_failed('{"result": "ok"}') is False
-    # JSON array → success (only dict with success:false triggers failure)
+    # JSON array → success (only a dict envelope can signal failure)
     assert _tool_result_failed('[{"success": false}]') is False
+    # JSON with neither success nor error → success (empty payload,
+    # "result" keys, etc.)
+    assert _tool_result_failed('{"result": "ok"}') is False
+    assert _tool_result_failed("{}") is False
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -441,6 +466,37 @@ def test_messages_pagination_bounds():
 # ─────────────────────────────────────────────────────────────────────
 # JobUpdateRequest new fields (model/provider/base_url/script)
 # ─────────────────────────────────────────────────────────────────────
+
+
+def test_job_update_parses_schedule_string():
+    """Regression: cron.jobs.update_job expects `updates["schedule"]`
+    to be an already-parsed dict, not the raw wire-level string. The
+    route must parse it before passing through, otherwise patching
+    the schedule crashes with AttributeError.
+    """
+    client = _build_client(token=None)
+    created = client.post(
+        "/api/jobs",
+        json={"name": "sched-test", "schedule": "0 9 * * *", "prompt": "hi"},
+    )
+    assert created.status_code == 200
+    job_id = created.json()["job"]["id"]
+
+    # PATCH with a new schedule string — should succeed. Before the
+    # fix this raised 500 "AttributeError: 'str' object has no
+    # attribute 'get'".
+    updated = client.patch(
+        f"/api/jobs/{job_id}", json={"schedule": "*/5 * * * *"}
+    )
+    assert updated.status_code == 200, (
+        f"schedule PATCH returned {updated.status_code}: {updated.text}"
+    )
+
+    # Invalid schedule → 400 (not 500)
+    bad = client.patch(f"/api/jobs/{job_id}", json={"schedule": ""})
+    assert bad.status_code in (400, 422), (
+        f"empty schedule should be rejected, got {bad.status_code}"
+    )
 
 
 def test_job_update_accepts_all_create_fields():

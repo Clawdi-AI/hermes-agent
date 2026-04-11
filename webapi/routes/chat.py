@@ -100,32 +100,65 @@ def _result_preview(content: Any, limit: int = 4000) -> str:
 
 
 def _tool_result_failed(content: Any) -> bool:
-    """Return True iff a tool-role message is an explicit structured
-    failure.
+    """Return True iff a tool-role message is a structured failure.
 
-    The previous implementation used a substring match on "error" or
-    "failed", which mis-classified every legitimate tool result that
-    happened to contain either word — grep hits, unit-test summaries
-    like "0 failed", search output referencing error logs, git diffs
-    of old tracebacks, and so on.
+    Hermes tools are *inconsistent* about the failure envelope they
+    emit. Observed shapes (after auditing ``tools/*.py``):
 
-    The correct signal is the structured JSON envelope Hermes tools
-    use: ``{"success": False, "error": "..."}``. Anything that isn't
-    a JSON object with an explicit ``success: false`` key is treated
-    as a success so that plain-text tool output (the common case) is
-    never mislabeled.
+    - ``{"success": False, "error": "..."}`` — ``memory_tool``,
+      ``skills_tool``, parts of ``web_tools``.
+    - ``{"error": "..."}`` **without** a ``success`` field —
+      ``delegate_tool``, ``file_tools``, ``tools/registry.py``'s
+      exception wrapper, several ``web_tools`` branches.
+    - Plain text — almost every other code path, including grep/test
+      output that happens to contain the word "error".
+
+    Classifying plain text as failure (the original implementation's
+    substring match) is wrong because it mislabels legitimate output.
+    Classifying only ``success: false`` as failure (the first fix
+    pass) is wrong the other way — it misses the very common
+    ``{"error": "..."}`` shape and renders real failures as green
+    cards.
+
+    The correct contract:
+
+    1. If the content isn't a JSON object, treat it as success
+       (plain-text output is the common case and is never a failure).
+    2. If it IS a JSON object:
+       - explicit ``success: false`` → failure
+       - explicit ``success: true`` → success
+       - no ``success`` field but an ``error`` key with a truthy value
+         → failure (the unstructured-error-envelope shape)
+       - otherwise → success
+
+    This catches every tool in the tools/ directory's failure paths
+    while still tolerating the large set of tools that legitimately
+    put the word "error" in a success payload (log summaries, test
+    results, search hits, etc).
     """
     if not isinstance(content, str):
         return False
     text = content.strip()
-    if not text or text[0] not in "{[":
+    if not text or text[0] != "{":
         return False
     try:
         parsed = json.loads(text)
     except (TypeError, json.JSONDecodeError):
         return False
-    if isinstance(parsed, dict):
-        return parsed.get("success") is False
+    if not isinstance(parsed, dict):
+        return False
+    if parsed.get("success") is False:
+        return True
+    if parsed.get("success") is True:
+        return False
+    # No explicit success field. An `error` key with a non-empty value
+    # is the idiomatic "this failed" shape in tools that didn't adopt
+    # the full envelope.
+    err = parsed.get("error")
+    if isinstance(err, str) and err.strip():
+        return True
+    if isinstance(err, dict) and err:
+        return True
     return False
 
 

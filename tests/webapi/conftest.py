@@ -263,7 +263,17 @@ def _install_stubs() -> None:
     def _fake_remove_job(job_id):
         return _jobs_store.pop(job_id, None) is not None
 
+    def _fake_parse_schedule(raw):
+        # Mirror the shape cron.jobs.parse_schedule returns for an
+        # interval string. The test doesn't need full parity with the
+        # real parser — only that the route passes the string through
+        # this function rather than the raw str.
+        if not isinstance(raw, str) or not raw.strip():
+            raise ValueError(f"Invalid schedule {raw!r}")
+        return {"kind": "cron", "expr": raw, "display": raw}
+
     cj = sys.modules["cron.jobs"]
+    cj.parse_schedule = _fake_parse_schedule  # type: ignore[attr-defined]
     cj.list_jobs = lambda include_disabled=False: list(_jobs_store.values())  # type: ignore[attr-defined]
     cj.get_job = lambda job_id: _jobs_store.get(job_id)  # type: ignore[attr-defined]
     cj.create_job = _fake_create_job  # type: ignore[attr-defined]
