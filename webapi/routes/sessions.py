@@ -1,8 +1,9 @@
 import json
 import sqlite3
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from starlette.concurrency import run_in_threadpool
 
 from hermes_state import SessionDB
 from webapi.deps import WEB_SOURCE, ensure_session_title, get_session_db, new_session_id
@@ -23,6 +24,15 @@ from webapi.models.sessions import (
 router = APIRouter(prefix="/api/sessions", tags=["sessions"])
 
 
+# All ``SessionDB`` methods are synchronous SQLite calls. Calling them
+# directly from an ``async def`` handler would block the event loop for
+# the duration of the query — fine for in-memory test fixtures but
+# problematic in production where the SQLite file lives on a network
+# volume and a single ``COUNT(*)`` over a large session table can take
+# tens of milliseconds. Every route in this module funnels DB work
+# through ``run_in_threadpool`` so the loop stays responsive.
+
+
 def _coerce_session(row: dict) -> SessionRecord:
     return SessionRecord.model_validate(row)
 
@@ -38,7 +48,8 @@ async def search_sessions(
     offset: int = Query(0, ge=0),
     session_db: Annotated[SessionDB, Depends(get_session_db)] = None,
 ) -> SearchSessionsResponse:
-    results = session_db.search_messages(
+    results = await run_in_threadpool(
+        session_db.search_messages,
         q,
         source_filter=["web", "webapi", "cli", "telegram", "discord", "whatsapp", "slack"],
         limit=limit,
@@ -47,11 +58,18 @@ async def search_sessions(
     return SearchSessionsResponse(query=q, count=len(results), results=results)
 
 
-@router.post("", response_model=SessionDetailResponse, status_code=201)
-async def create_session(
+def _create_session_sync(
+    *,
+    session_db: SessionDB,
     payload: SessionCreateRequest,
-    session_db: Annotated[SessionDB, Depends(get_session_db)],
-) -> SessionDetailResponse:
+) -> dict[str, Any]:
+    """Run create + optional title-set + read-back in one threadpool hop.
+
+    Bundling these into a single call (instead of three separate
+    ``run_in_threadpool`` round-trips) keeps the operation atomic from
+    the SessionDB lock's perspective and avoids three event-loop
+    re-entries for what is logically one transaction.
+    """
     session_id = payload.id or new_session_id()
     title = ensure_session_title(session_db, payload.title)
     session_db.create_session(
@@ -65,8 +83,30 @@ async def create_session(
     )
     if title:
         session_db.set_session_title(session_id, title)
-    session = session_db.get_session(session_id)
+    return session_db.get_session(session_id)
+
+
+@router.post("", response_model=SessionDetailResponse, status_code=201)
+async def create_session(
+    payload: SessionCreateRequest,
+    session_db: Annotated[SessionDB, Depends(get_session_db)],
+) -> SessionDetailResponse:
+    session = await run_in_threadpool(
+        _create_session_sync, session_db=session_db, payload=payload
+    )
     return SessionDetailResponse(session=_coerce_session(session))
+
+
+def _list_sessions_sync(
+    *,
+    session_db: SessionDB,
+    source: str | None,
+    limit: int,
+    offset: int,
+) -> tuple[list[dict[str, Any]], int]:
+    sessions = session_db.list_sessions_rich(source=source, limit=limit, offset=offset)
+    total = session_db.session_count(source=source)
+    return sessions, total
 
 
 @router.get("", response_model=SessionListResponse)
@@ -76,8 +116,14 @@ async def list_sessions(
     source: str | None = Query(None),
     session_db: Annotated[SessionDB, Depends(get_session_db)] = None,
 ) -> SessionListResponse:
-    sessions = session_db.list_sessions_rich(source=source, limit=limit, offset=offset)
-    return SessionListResponse(items=[_coerce_session(item) for item in sessions], total=session_db.session_count(source=source))
+    sessions, total = await run_in_threadpool(
+        _list_sessions_sync,
+        session_db=session_db,
+        source=source,
+        limit=limit,
+        offset=offset,
+    )
+    return SessionListResponse(items=[_coerce_session(item) for item in sessions], total=total)
 
 
 @router.get("/{session_id}", response_model=SessionDetailResponse)
@@ -85,7 +131,7 @@ async def get_session(
     session_id: str,
     session_db: Annotated[SessionDB, Depends(get_session_db)],
 ) -> SessionDetailResponse:
-    session = session_db.get_session(session_id)
+    session = await run_in_threadpool(session_db.get_session, session_id)
     if not session:
         raise HTTPException(status_code=404, detail=f"Session '{session_id}' not found")
     return SessionDetailResponse(session=_coerce_session(session))
@@ -125,31 +171,59 @@ async def get_session_messages(
     the client can render correct "X of N" indicators and know when it
     has reached the head.
     """
-    if not session_db.get_session(session_id):
+    # Bundle exists-check + count + page-load into a single threadpool
+    # hop so the three SQLite reads run back-to-back without three
+    # event-loop re-entries.
+    def _load() -> tuple[bool, int, list[dict[str, Any]]]:
+        exists = session_db.get_session(session_id) is not None
+        if not exists:
+            return False, 0, []
+        total_count = session_db.count_messages(session_id)
+        if limit == 0:
+            # Legacy behavior: unbounded load. Only used by callers that
+            # explicitly want the full transcript (e.g. cron job runners,
+            # export flows). Chat UIs should always set a limit.
+            rows = session_db.get_messages(session_id)
+        else:
+            rows = session_db.get_messages_page(
+                session_id,
+                limit=limit,
+                offset=offset,
+                tail=tail,
+            )
+        return True, total_count, rows
+
+    exists, total, selected = await run_in_threadpool(_load)
+    if not exists:
         raise HTTPException(status_code=404, detail=f"Session '{session_id}' not found")
-
-    # Total always reflects the full session length so chat UIs can
-    # render "X of N" indicators — done as a cheap COUNT(*) rather than
-    # loading every message.
-    total = session_db.count_messages(session_id)
-
-    if limit == 0:
-        # Legacy behavior: unbounded load. Only used by callers that
-        # explicitly want the full transcript (e.g. cron job runners,
-        # export flows). Chat UIs should always set a limit.
-        selected = session_db.get_messages(session_id)
-    else:
-        selected = session_db.get_messages_page(
-            session_id,
-            limit=limit,
-            offset=offset,
-            tail=tail,
-        )
 
     return MessageListResponse(
         items=[_coerce_message(item) for item in selected],
         total=total,
     )
+
+
+def _patch_session_sync(
+    *,
+    session_db: SessionDB,
+    session_id: str,
+    payload: SessionPatchRequest,
+) -> dict[str, Any] | None:
+    """Apply the PATCH atomically inside one threadpool hop.
+
+    Returns ``None`` if the session doesn't exist. ``ValueError`` from
+    ``set_session_title`` propagates so the caller can map it to a 400.
+    """
+    session = session_db.get_session(session_id)
+    if not session:
+        return None
+    if payload.title is not None:
+        session_db.set_session_title(session_id, payload.title)
+    if payload.system_prompt is not None:
+        session_db.update_system_prompt(session_id, payload.system_prompt)
+    if payload.end_reason is not None:
+        session_db.end_session(session_id, payload.end_reason)
+    return session_db.get_session(session_id)
 
 
 @router.patch("/{session_id}", response_model=SessionDetailResponse)
@@ -158,21 +232,17 @@ async def patch_session(
     payload: SessionPatchRequest,
     session_db: Annotated[SessionDB, Depends(get_session_db)],
 ) -> SessionDetailResponse:
-    session = session_db.get_session(session_id)
-    if not session:
+    try:
+        updated = await run_in_threadpool(
+            _patch_session_sync,
+            session_db=session_db,
+            session_id=session_id,
+            payload=payload,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if updated is None:
         raise HTTPException(status_code=404, detail=f"Session '{session_id}' not found")
-
-    if payload.title is not None:
-        try:
-            session_db.set_session_title(session_id, payload.title)
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-    if payload.system_prompt is not None:
-        session_db.update_system_prompt(session_id, payload.system_prompt)
-    if payload.end_reason is not None:
-        session_db.end_session(session_id, payload.end_reason)
-
-    updated = session_db.get_session(session_id)
     return SessionDetailResponse(session=_coerce_session(updated))
 
 
@@ -182,7 +252,7 @@ async def delete_session(
     session_db: Annotated[SessionDB, Depends(get_session_db)],
 ) -> SessionDeleteResponse:
     try:
-        deleted = session_db.delete_session(session_id)
+        deleted = await run_in_threadpool(session_db.delete_session, session_id)
     except sqlite3.IntegrityError as exc:
         raise HTTPException(
             status_code=409,
@@ -195,14 +265,21 @@ async def delete_session(
     return SessionDeleteResponse(session_id=session_id)
 
 
-@router.post("/{session_id}/fork", response_model=ForkSessionResponse)
-async def fork_session(
+def _fork_session_sync(
+    *,
+    session_db: SessionDB,
     session_id: str,
-    session_db: Annotated[SessionDB, Depends(get_session_db)],
-) -> ForkSessionResponse:
+) -> dict[str, Any] | None:
+    """Atomically fork a session inside a single threadpool hop.
+
+    For large sessions the loop over ``original["messages"]`` can be
+    O(thousands) of synchronous SQLite writes — running this from an
+    ``async def`` directly would monopolize the event loop for the
+    entire fork. Returns ``None`` if the source session is missing.
+    """
     original = session_db.export_session(session_id)
     if not original:
-        raise HTTPException(status_code=404, detail=f"Session '{session_id}' not found")
+        return None
 
     fork_id = new_session_id()
     fork_title = session_db.get_next_title_in_lineage(original.get("title") or "New Chat")
@@ -235,5 +312,17 @@ async def fork_session(
             finish_reason=message.get("finish_reason"),
         )
 
-    forked = session_db.get_session(fork_id)
+    return session_db.get_session(fork_id)
+
+
+@router.post("/{session_id}/fork", response_model=ForkSessionResponse)
+async def fork_session(
+    session_id: str,
+    session_db: Annotated[SessionDB, Depends(get_session_db)],
+) -> ForkSessionResponse:
+    forked = await run_in_threadpool(
+        _fork_session_sync, session_db=session_db, session_id=session_id
+    )
+    if forked is None:
+        raise HTTPException(status_code=404, detail=f"Session '{session_id}' not found")
     return ForkSessionResponse(session=_coerce_session(forked), forked_from=session_id)

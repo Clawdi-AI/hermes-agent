@@ -514,3 +514,206 @@ def test_job_update_accepts_all_create_fields():
         f"JobUpdateRequest is missing fields present in JobCreateRequest: {missing}"
     )
     assert "enabled" in update_fields
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Exception sanitization (round 6 #4 #7 #14)
+# ─────────────────────────────────────────────────────────────────────
+#
+# Every error path that crosses the network boundary must NEVER reflect
+# raw ``str(exc)`` content. Provider/tool exception messages routinely
+# carry secrets (API keys in 401 bodies), file system paths, SQL
+# fragments, and stack-trace fragments. The sanitization fix replaces
+# them with stable opaque messages and logs the real exception
+# server-side. These tests pin that contract.
+
+
+def _build_unsafe_client(*, token: str | None = None):
+    """Like ``_build_client`` but with ``raise_server_exceptions=False``.
+
+    Default Starlette ``TestClient`` re-raises any exception that
+    bubbles out of a route, which short-circuits the registered
+    ``Exception`` handler so we can't observe what the *client* would
+    receive. The exception sanitization tests need the handler-applied
+    response, so they bypass the default and let Starlette translate
+    exceptions into JSONResponses just like a real network client
+    would see.
+    """
+    from fastapi.testclient import TestClient
+
+    if token is None:
+        os.environ.pop("HERMES_API_TOKEN", None)
+    else:
+        os.environ["HERMES_API_TOKEN"] = token
+
+    for key in list(sys.modules.keys()):
+        if key.startswith("webapi"):
+            del sys.modules[key]
+
+    webapi_app = importlib.import_module("webapi.app")
+    return TestClient(webapi_app.app, raise_server_exceptions=False)
+
+
+def test_unhandled_exception_handler_does_not_leak_raw_message():
+    """Round 6 #7 — webapi/errors.py:32 used to return ``str(exc)`` to
+    the browser. Inject a route that raises with a sentinel string in
+    the exception message and assert it does NOT appear in the
+    response body."""
+    secret_marker = "API_KEY=sk-leaked-1234567890"
+
+    client = _build_unsafe_client(token=None)
+    # Add a one-shot route to the live app whose handler always raises
+    # with the sentinel marker in the message. This goes through the
+    # global Exception handler we hardened. ``webapi.app`` exposes
+    # the FastAPI instance as the module attribute ``app``.
+    from webapi.app import app as fastapi_app
+
+    @fastapi_app.get("/__test/leak")
+    async def _leak_route() -> dict:
+        raise RuntimeError(f"sensitive: {secret_marker}")
+
+    resp = client.get("/__test/leak")
+    assert resp.status_code == 500
+    body = resp.json()
+    assert body == {
+        "error": {"message": "Internal server error", "type": "internal_error"}
+    }, f"raw message leaked: {body}"
+    assert secret_marker not in resp.text
+
+
+def test_config_patch_failure_does_not_leak_filesystem_path(monkeypatch):
+    """Round 6 #14 — config.py used to return ``str(exc)`` from a
+    bare ``except``. Force ``save_config`` to raise with a path-like
+    sentinel and confirm the response is the stable opaque message."""
+    sentinel = "/private/tmp/hermes/config.yaml.bak.99999"
+
+    def _explode(_cfg):
+        raise OSError(f"can't write {sentinel}: Permission denied")
+
+    client = _build_unsafe_client(token=None)
+
+    # ``webapi.routes.config`` does ``from hermes_cli.config import
+    # save_config`` at import time, so patching ``sys.modules`` after
+    # the fact has no effect — the route module already holds its own
+    # reference. Patch on the route module instead.
+    from webapi.routes import config as config_route
+
+    monkeypatch.setattr(config_route, "save_config", _explode)
+
+    resp = client.patch("/api/config", json={"model": "claude-sonnet"})
+    assert resp.status_code == 500
+    body = resp.json()
+    # The route-level ``except`` raises ``HTTPException(500, "Failed to
+    # update config")``, which the registered HTTPException handler
+    # catches before the global Exception handler. Either way the raw
+    # OSError text must not appear in the response.
+    assert body["error"]["message"] == "Failed to update config"
+    assert sentinel not in resp.text
+
+
+def test_chat_failure_does_not_leak_provider_error(monkeypatch):
+    """Round 6 #4 — webapi/routes/chat.py used to ``HTTPException(500,
+    detail=result["error"])``. Force ``_run_chat`` to return a result
+    dict with a sentinel error string and confirm the response body
+    doesn't include it."""
+    sentinel = "anthropic 401 invalid api key sk-ant-leak-xyz"
+
+    client = _build_unsafe_client(token=None)
+    sid = client.post("/api/sessions", json={"title": "leak-test"}).json()[
+        "session"
+    ]["id"]
+
+    from webapi.routes import chat as chat_module
+
+    async def _fake_threadpool(*args, **kwargs):
+        return {"error": sentinel, "final_response": None}
+
+    # Patch ``run_in_threadpool`` only inside the chat module to skip
+    # the threadpool hop and return our canned dict directly.
+    monkeypatch.setattr(chat_module, "run_in_threadpool", _fake_threadpool)
+
+    resp = client.post(f"/api/sessions/{sid}/chat", json={"message": "hi"})
+    assert resp.status_code == 500
+    body = resp.json()
+    assert body["error"]["message"] == "Chat agent failed"
+    assert sentinel not in resp.text
+
+
+# ─────────────────────────────────────────────────────────────────────
+# SSE bounded buffer (round 5 #9)
+# ─────────────────────────────────────────────────────────────────────
+
+
+def test_sse_stream_drops_frames_when_buffer_full():
+    """The bounded ``SSEStream`` queue MUST drop new frames once full
+    rather than blocking the worker thread or growing unbounded.
+    Verifies the dropped-frame counter increments and ``close`` still
+    terminates the consumer iterator even with a saturated buffer.
+    """
+    from webapi.sse import SSEEmitter, SSEStream
+
+    stream = SSEStream(max_frames=4)
+    emitter = SSEEmitter(session_id="s1", run_id="r1")
+
+    # Fill the buffer past capacity. The first 4 frames go in, the
+    # next 6 are dropped (and the worker thread keeps running, never
+    # blocked on a bounded ``put`` — that's the whole point of using
+    # ``put_nowait`` instead of a blocking sentinel).
+    for i in range(10):
+        stream.put(emitter.event("test", index=i))
+
+    assert stream.dropped_frames == 6
+
+    # Closing while the buffer is full must NOT block (no sentinel
+    # push). The consumer iterator races ``queue.get(timeout=...)``
+    # against the close flag and terminates as soon as the queue
+    # drains AND ``close()`` has been called.
+    stream.close()
+
+    consumed = list(stream)
+    assert len(consumed) == 4
+
+    # After close, further puts are no-ops (don't crash, don't increase
+    # the dropped-frame counter — the worker thread is well-behaved
+    # and may legitimately try to push trailing frames after the
+    # generator already saw GeneratorExit).
+    stream.put(emitter.event("test", index=99))
+    assert stream.dropped_frames == 6
+
+
+# ─────────────────────────────────────────────────────────────────────
+# OpenAPI schema reflects SSE response (round 4 #5)
+# ─────────────────────────────────────────────────────────────────────
+
+
+def test_chat_stream_route_advertises_sse_in_openapi():
+    """The ``/chat/stream`` route returns ``text/event-stream`` not
+    ``application/json``. The generated OpenAPI schema must reflect
+    that so ``openapi-typescript`` consumers don't try to JSON-parse a
+    streaming response.
+    """
+    client = _build_client(token=None)
+    schema = client.get("/openapi.json").json()
+    paths = schema["paths"]
+    stream_path = "/api/sessions/{session_id}/chat/stream"
+    assert stream_path in paths, f"missing route in schema: {stream_path}"
+    op = paths[stream_path]["post"]
+    content = op["responses"]["200"]["content"]
+    assert "text/event-stream" in content, (
+        f"chat stream route should advertise text/event-stream, got {content}"
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────
+# __main__ default port (round 4 #6)
+# ─────────────────────────────────────────────────────────────────────
+
+
+def test_main_default_port_matches_controller():
+    """The controller (Clawdi side) hard-codes 8643 as the upstream
+    port for ``/_hermes/*``. ``webapi/__main__.py`` must use the same
+    default so local-dev binds the port the controller probes.
+    """
+    from webapi import __main__ as webapi_main
+
+    assert webapi_main.DEFAULT_PORT == 8643

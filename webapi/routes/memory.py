@@ -1,6 +1,7 @@
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from starlette.concurrency import run_in_threadpool
 
 from tools.memory_tool import MemoryStore
 from webapi.deps import reload_memory_store
@@ -14,6 +15,12 @@ from webapi.models.memory import (
 
 
 router = APIRouter(prefix="/api/memory", tags=["memory"])
+
+# ``MemoryStore.add/replace/remove`` take per-file locks and call
+# ``fsync`` on every mutation. Calling them directly from an ``async``
+# handler would block the event loop on every memory edit. Read paths
+# (``__init__`` / property accessors) only touch already-loaded
+# in-memory dicts and are safe to call directly.
 
 
 def _read_target(store: MemoryStore, target: str) -> dict:
@@ -54,7 +61,7 @@ async def add_memory(
     payload: MemoryPostRequest,
     store: Annotated[MemoryStore, Depends(reload_memory_store)],
 ) -> MemoryMutationResponse:
-    result = store.add(payload.target, payload.content)
+    result = await run_in_threadpool(store.add, payload.target, payload.content)
     if not result.get("success"):
         raise HTTPException(status_code=400, detail=result.get("error"))
     return MemoryMutationResponse.model_validate(result)
@@ -65,7 +72,9 @@ async def patch_memory(
     payload: MemoryPatchRequest,
     store: Annotated[MemoryStore, Depends(reload_memory_store)],
 ) -> MemoryMutationResponse:
-    result = store.replace(payload.target, payload.old_text, payload.content)
+    result = await run_in_threadpool(
+        store.replace, payload.target, payload.old_text, payload.content
+    )
     if not result.get("success"):
         raise HTTPException(status_code=400, detail=result.get("error"))
     return MemoryMutationResponse.model_validate(result)
@@ -76,7 +85,7 @@ async def delete_memory(
     payload: MemoryDeleteRequest,
     store: Annotated[MemoryStore, Depends(reload_memory_store)],
 ) -> MemoryMutationResponse:
-    result = store.remove(payload.target, payload.old_text)
+    result = await run_in_threadpool(store.remove, payload.target, payload.old_text)
     if not result.get("success"):
         raise HTTPException(status_code=400, detail=result.get("error"))
     return MemoryMutationResponse.model_validate(result)

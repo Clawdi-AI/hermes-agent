@@ -1,4 +1,5 @@
 import json
+import logging
 import threading
 import uuid
 from typing import Annotated, Any
@@ -12,6 +13,8 @@ from run_agent import AIAgent
 from webapi.deps import create_agent, get_session_db, get_session_or_404, get_runtime_model
 from webapi.models.chat import ChatRequest, ChatResponse
 from webapi.sse import SSEEmitter, SSEStream
+
+logger = logging.getLogger(__name__)
 
 
 
@@ -285,7 +288,15 @@ async def chat(
 ) -> ChatResponse:
     result = await run_in_threadpool(_run_chat, session_id=session_id, payload=payload, session_db=session_db)
     if result.get("error") and not result.get("final_response"):
-        raise HTTPException(status_code=500, detail=result["error"])
+        # Log the raw provider/tool error for the operator but return a
+        # stable opaque message — agent.run_conversation can surface
+        # provider API keys, file paths, or stack-trace fragments here.
+        logger.error(
+            "[webapi.chat] non-streaming chat failed for session %s: %s",
+            session_id,
+            result.get("error"),
+        )
+        raise HTTPException(status_code=500, detail="Chat agent failed")
     return ChatResponse(
         session_id=session_id,
         run_id=f"run_{uuid.uuid4().hex}",
@@ -301,7 +312,25 @@ async def chat(
     )
 
 
-@router.post("/{session_id}/chat/stream")
+@router.post(
+    "/{session_id}/chat/stream",
+    # FastAPI's default schema generator would infer a JSON response
+    # from the ``StreamingResponse`` return annotation, which is wrong:
+    # this endpoint serves Server-Sent Events (``text/event-stream``).
+    # ``response_class`` tells FastAPI to NOT add the implicit JSON
+    # content entry, and ``responses=`` declares the real content type
+    # so generated clients (the Clawdi Hermes adapter uses
+    # ``openapi-typescript``) don't try to JSON-parse a streaming
+    # response. The SSE event envelopes themselves are documented on
+    # the TypeScript side; we don't pin a schema for them here.
+    response_class=StreamingResponse,
+    responses={
+        200: {
+            "description": "Server-Sent Events stream of run/tool/message frames.",
+            "content": {"text/event-stream": {}},
+        }
+    },
+)
 async def chat_stream(
     session_id: str,
     payload: ChatRequest,
@@ -461,8 +490,16 @@ async def chat_stream(
                 persist_user_message=persist_text,
             )
             _emit_post_run_events(emitter, stream, result, assistant_message_id)
-        except Exception as exc:
-            stream.put(emitter.event("error", message=str(exc)))
+        except Exception:
+            # Same rationale as the non-streaming path: never push
+            # ``str(exc)`` over the wire. The worker exception is
+            # almost always provider/tool internals (API keys in
+            # rate-limit text, file paths from skills, etc).
+            logger.exception(
+                "[webapi.chat] streaming worker failed for session %s",
+                session_id,
+            )
+            stream.put(emitter.event("error", message="Chat agent failed"))
         finally:
             stream.put(emitter.event("done"))
             stream.close()
