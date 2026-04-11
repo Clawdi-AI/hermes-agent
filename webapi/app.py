@@ -14,16 +14,19 @@ from webapi.routes.models import router as models_router
 from webapi.routes.sessions import router as sessions_router
 from webapi.routes.skills import router as skills_router
 
-# Default origins cover common local dev ports (3000-3010) + any explicitly
-# configured origin via HERMES_CORS_ORIGINS (comma-separated).
-_DEFAULT_ORIGINS = [f"http://localhost:{p}" for p in range(3000, 3011)] + \
-                   [f"http://127.0.0.1:{p}" for p in range(3000, 3011)]
+# In production webapi is only reached via the agent-image controller
+# at 127.0.0.1:19000 (hermes-workspace Node UI) or externally through
+# the controller's `/_hermes/*` proxy (which enforces its own CORS).
+# The default list just unblocks local dev against `bun run dev` on
+# :3000. Anything else should be set explicitly via HERMES_CORS_ORIGINS.
+_DEFAULT_ORIGINS = ("http://localhost:3000", "http://127.0.0.1:3000")
+
 
 def _get_cors_origins() -> list[str]:
     extra = os.environ.get("HERMES_CORS_ORIGINS", "").strip()
     if extra:
         return [o.strip() for o in extra.split(",") if o.strip()]
-    return _DEFAULT_ORIGINS
+    return list(_DEFAULT_ORIGINS)
 
 
 def create_app() -> FastAPI:

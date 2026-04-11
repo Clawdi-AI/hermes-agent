@@ -1,5 +1,4 @@
 import json
-import logging
 import threading
 import uuid
 from typing import Annotated, Any
@@ -14,7 +13,6 @@ from webapi.deps import create_agent, get_session_db, get_session_or_404, get_ru
 from webapi.models.chat import ChatRequest, ChatResponse
 from webapi.sse import SSEEmitter, SSEStream
 
-logger = logging.getLogger(__name__)
 
 
 router = APIRouter(prefix="/api/sessions", tags=["chat"])
@@ -341,15 +339,30 @@ async def chat_stream(
         )
     )
 
-    # Mutable container shared between the worker thread and the async
-    # generator below. The async generator catches client disconnect
-    # (GeneratorExit / CancelledError raised by StreamingResponse) and
-    # calls agent.interrupt() on whatever reference the worker has set,
-    # which signals the running agent loop to stop cleanly at the next
-    # tool-call boundary. Without this, daemon threads would keep
-    # executing and burning model tokens long after the user's tab closed.
+    # Shared state between the worker thread and the async generator
+    # that feeds StreamingResponse. The generator catches client
+    # disconnect (`GeneratorExit` raised when the client aborts the
+    # SSE connection) and signals the worker to stop burning tokens
+    # on a stream nobody is reading.
+    #
+    # Two signals are needed because `create_agent` can take non-
+    # trivial time (load skills, read memory, etc):
+    #
+    #   * `cancelled`: set by the generator on disconnect. The worker
+    #     checks it right after agent creation so we can bail out
+    #     BEFORE `run_conversation` burns any tokens if the user
+    #     already gave up during startup. Without this flag there's a
+    #     race window where the worker starts a non-interruptible
+    #     agent turn even though the interrupt call from the
+    #     generator ran against an `agent_ref[0]` that was still None.
+    #   * `agent_ref`: the live agent instance, published by the
+    #     worker once `create_agent` returns. The generator calls
+    #     `agent.interrupt()` on it if the worker is already running
+    #     when disconnect happens. Combined with `cancelled`, every
+    #     disconnect either stops before `run_conversation` starts
+    #     or interrupts it mid-flight.
+    cancelled = threading.Event()
     agent_ref: list[AIAgent | None] = [None]
-    worker_done = threading.Event()
 
     def worker() -> None:
         try:
@@ -411,6 +424,12 @@ async def chat_stream(
                     )
                 )
 
+            # Fast-path bail: the client can disconnect while we're
+            # loading session history. No point building an agent
+            # we'll never run.
+            if cancelled.is_set():
+                return
+
             agent = create_agent(
                 session_id=session_id,
                 session_db=session_db,
@@ -424,9 +443,17 @@ async def chat_stream(
                 tool_progress_callback=tool_progress_callback,
                 tool_start_callback=tool_start_callback,
             )
-            # Expose the agent to the async generator so client-disconnect
-            # handling can call agent.interrupt() on the correct instance.
             agent_ref[0] = agent
+            # Close the race between "agent created" and
+            # "run_conversation about to start": if the generator's
+            # GeneratorExit ran during `create_agent` it called
+            # `_interrupt_agent(agent_ref[0])` when the ref was
+            # still None. Re-check so we honor the disconnect before
+            # burning any inference tokens.
+            if cancelled.is_set():
+                agent.interrupt("SSE client disconnected during startup")
+                return
+
             result = agent.run_conversation(
                 user_content,
                 conversation_history=history,
@@ -437,7 +464,6 @@ async def chat_stream(
         except Exception as exc:
             stream.put(emitter.event("error", message=str(exc)))
         finally:
-            worker_done.set()
             stream.put(emitter.event("done"))
             stream.close()
 
@@ -456,17 +482,15 @@ async def chat_stream(
             async for chunk in stream.aiter():
                 yield chunk
         except GeneratorExit:
-            # Client disconnected before the worker finished. Ask the agent
-            # to stop at the next safe boundary so we don't keep billing
-            # tokens for a stream nobody is reading.
+            # Client disconnected before the worker finished. Set
+            # `cancelled` FIRST so the worker bails out of startup
+            # if it hasn't yet spawned the agent, then interrupt
+            # the agent if it's already running. The worker's
+            # post-create_agent re-check closes the race where
+            # `agent_ref[0]` was still None when this code ran.
+            cancelled.set()
             _interrupt_agent(agent_ref[0], "SSE client disconnected")
             raise
-        finally:
-            # Extra safety: if the generator exits cleanly but the worker
-            # is still running for some reason (e.g. uvicorn shutdown),
-            # try to interrupt so the thread drains.
-            if not worker_done.is_set():
-                _interrupt_agent(agent_ref[0], "Stream closed")
 
     return StreamingResponse(
         event_stream(),
@@ -480,10 +504,9 @@ async def chat_stream(
 
 
 def _interrupt_agent(agent: AIAgent | None, reason: str) -> None:
-    """Safely call ``agent.interrupt(reason)`` with full exception handling."""
-    if agent is None:
-        return
-    try:
+    """Call ``agent.interrupt(reason)`` if the worker has already
+    published an instance. ``AIAgent.interrupt`` just sets an internal
+    flag and does not raise, so no try/except is needed.
+    """
+    if agent is not None:
         agent.interrupt(reason)
-    except Exception as exc:  # pragma: no cover - defensive
-        logger.warning("Failed to interrupt agent: %s", exc)
