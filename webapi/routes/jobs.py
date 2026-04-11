@@ -16,6 +16,7 @@ import re
 from typing import Any, NoReturn
 
 from fastapi import APIRouter, HTTPException, Query, status
+from starlette.concurrency import run_in_threadpool
 
 logger = logging.getLogger(__name__)
 
@@ -111,7 +112,10 @@ async def list_jobs(
 ) -> JobsListResponse:
     _check_available()
     try:
-        jobs = _cron_list(include_disabled=include_disabled)  # type: ignore[misc]
+        # ``cron.jobs.*`` reads/writes ``jobs.json`` with synchronous
+        # ``open`` + ``json.load`` + ``os.replace``. Wrap every call in
+        # a threadpool hop so the file IO doesn't block the event loop.
+        jobs = await run_in_threadpool(_cron_list, include_disabled=include_disabled)  # type: ignore[misc]
         return JobsListResponse(jobs=jobs)
     except Exception as exc:
         _internal_error("list_jobs", exc)
@@ -164,7 +168,7 @@ async def create_job(payload: JobCreateRequest) -> JobResponse:
         kwargs["script"] = payload.script
 
     try:
-        job = _cron_create(**kwargs)  # type: ignore[misc]
+        job = await run_in_threadpool(_cron_create, **kwargs)  # type: ignore[misc]
         return JobResponse(job=job)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -177,7 +181,7 @@ async def get_job(job_id: str) -> JobResponse:
     _check_available()
     _validate_job_id(job_id)
     try:
-        job = _cron_get(job_id)  # type: ignore[misc]
+        job = await run_in_threadpool(_cron_get, job_id)  # type: ignore[misc]
     except Exception as exc:
         _internal_error("get_job", exc)
     if not job:
@@ -210,7 +214,8 @@ async def update_job(job_id: str, payload: JobUpdateRequest) -> JobResponse:
     # on it). The wire-level contract is a string though, matching
     # `JobCreateRequest.schedule`, so we parse it here before handing
     # off. ``parse_schedule`` raises ValueError on invalid input which
-    # we surface as a 400.
+    # we surface as a 400. The parser is pure (no IO) so it can stay
+    # on the loop thread.
     if "schedule" in sanitized and isinstance(sanitized["schedule"], str):
         try:
             sanitized["schedule"] = _cron_parse_schedule(  # type: ignore[misc]
@@ -220,7 +225,7 @@ async def update_job(job_id: str, payload: JobUpdateRequest) -> JobResponse:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     try:
-        job = _cron_update(job_id, sanitized)  # type: ignore[misc]
+        job = await run_in_threadpool(_cron_update, job_id, sanitized)  # type: ignore[misc]
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
@@ -235,7 +240,7 @@ async def delete_job(job_id: str) -> JobDeleteResponse:
     _check_available()
     _validate_job_id(job_id)
     try:
-        success = _cron_remove(job_id)  # type: ignore[misc]
+        success = await run_in_threadpool(_cron_remove, job_id)  # type: ignore[misc]
     except Exception as exc:
         _internal_error("delete_job", exc)
     if not success:
@@ -248,7 +253,7 @@ async def pause_job(job_id: str) -> JobResponse:
     _check_available()
     _validate_job_id(job_id)
     try:
-        job = _cron_pause(job_id)  # type: ignore[misc]
+        job = await run_in_threadpool(_cron_pause, job_id)  # type: ignore[misc]
     except Exception as exc:
         _internal_error("pause_job", exc)
     if not job:
@@ -261,7 +266,7 @@ async def resume_job(job_id: str) -> JobResponse:
     _check_available()
     _validate_job_id(job_id)
     try:
-        job = _cron_resume(job_id)  # type: ignore[misc]
+        job = await run_in_threadpool(_cron_resume, job_id)  # type: ignore[misc]
     except Exception as exc:
         _internal_error("resume_job", exc)
     if not job:
@@ -275,7 +280,7 @@ async def run_job_now(job_id: str) -> JobResponse:
     _check_available()
     _validate_job_id(job_id)
     try:
-        job = _cron_trigger(job_id)  # type: ignore[misc]
+        job = await run_in_threadpool(_cron_trigger, job_id)  # type: ignore[misc]
     except Exception as exc:
         _internal_error("run_job_now", exc)
     if not job:

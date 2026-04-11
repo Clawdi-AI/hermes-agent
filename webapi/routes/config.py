@@ -1,11 +1,16 @@
+import logging
 from typing import Any
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
+from starlette.concurrency import run_in_threadpool
 
 from hermes_cli.config import load_config, save_config
 from webapi.deps import get_config, get_runtime_agent_kwargs, get_runtime_model
 from webapi.models.config import ConfigPatchResponse, ConfigResponse
+
+
+logger = logging.getLogger(__name__)
 
 
 router = APIRouter(prefix="/api/config", tags=["config"])
@@ -118,12 +123,55 @@ async def get_web_config() -> ConfigResponse:
         model_str = raw_model.get("default", raw_model.get("model", str(raw_model)))
     else:
         model_str = raw_model
+    # ``get_config`` is a cached in-memory dict accessor (no disk IO),
+    # so it's safe to call directly from an async handler.
     return ConfigResponse(
         model=model_str,
         provider=runtime.get("provider"),
         api_mode=runtime.get("api_mode"),
         base_url=runtime.get("base_url"),
         config=get_config(),
+    )
+
+
+def _apply_config_patch(patch: ConfigPatch) -> ConfigPatchResponse:
+    """Pure-sync routine that loads, merges, and saves the YAML config.
+
+    Wrapped in ``run_in_threadpool`` by the route handler so the
+    blocking YAML disk IO doesn't stall the event loop.
+    """
+    config = load_config()
+
+    # Top-level shortcuts (backwards compatible with older clients)
+    if patch.model is not None:
+        config["model"] = patch.model
+    if patch.provider is not None:
+        config["provider"] = patch.provider
+    if patch.base_url is not None:
+        if patch.base_url.strip():
+            config["base_url"] = patch.base_url.strip()
+        else:
+            config.pop("base_url", None)  # empty string = remove it
+
+    # Nested sections: deep-merge any that were supplied
+    patch_dict = patch.model_dump(exclude_none=True)
+    for section in _MERGEABLE_SECTIONS:
+        section_patch = patch_dict.get(section)
+        if section_patch is None:
+            continue
+        existing = config.get(section)
+        if not isinstance(existing, dict):
+            existing = {}
+        config[section] = _deep_merge(existing, section_patch)
+
+    save_config(config)
+    return ConfigPatchResponse(
+        model=config.get("model"),
+        provider=config.get("provider"),
+        base_url=config.get("base_url"),
+        merged_sections=[
+            section for section in _MERGEABLE_SECTIONS if patch_dict.get(section) is not None
+        ],
     )
 
 
@@ -139,38 +187,9 @@ async def patch_web_config(patch: ConfigPatch) -> ConfigPatchResponse:
     removes the top-level base URL override.
     """
     try:
-        config = load_config()
-
-        # Top-level shortcuts (backwards compatible with older clients)
-        if patch.model is not None:
-            config["model"] = patch.model
-        if patch.provider is not None:
-            config["provider"] = patch.provider
-        if patch.base_url is not None:
-            if patch.base_url.strip():
-                config["base_url"] = patch.base_url.strip()
-            else:
-                config.pop("base_url", None)  # empty string = remove it
-
-        # Nested sections: deep-merge any that were supplied
-        patch_dict = patch.model_dump(exclude_none=True)
-        for section in _MERGEABLE_SECTIONS:
-            section_patch = patch_dict.get(section)
-            if section_patch is None:
-                continue
-            existing = config.get(section)
-            if not isinstance(existing, dict):
-                existing = {}
-            config[section] = _deep_merge(existing, section_patch)
-
-        save_config(config)
-        return ConfigPatchResponse(
-            model=config.get("model"),
-            provider=config.get("provider"),
-            base_url=config.get("base_url"),
-            merged_sections=[
-                section for section in _MERGEABLE_SECTIONS if patch_dict.get(section) is not None
-            ],
-        )
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e)) from e
+        return await run_in_threadpool(_apply_config_patch, patch)
+    except Exception:
+        # Don't echo raw filesystem / YAML exception text to the
+        # browser — paths and parser internals are operator-only.
+        logger.exception("[webapi.config] patch_web_config failed")
+        raise HTTPException(status_code=500, detail="Failed to update config")

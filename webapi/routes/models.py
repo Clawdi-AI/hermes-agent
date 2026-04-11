@@ -2,6 +2,7 @@ import time
 from typing import Optional
 
 from fastapi import APIRouter, Query
+from starlette.concurrency import run_in_threadpool
 
 from webapi.deps import get_runtime_model
 from webapi.models.models import (
@@ -39,6 +40,26 @@ async def list_models() -> OpenAIModelsResponse:
     )
 
 
+def _resolve_models(effective_provider: str) -> tuple[list[tuple[str, str]], list[str]]:
+    """Synchronous helper that hits the provider catalog.
+
+    ``hermes_cli.models`` performs blocking HTTP calls (``urllib.request.urlopen``)
+    against provider model-list endpoints with a multi-second timeout.
+    Calling that from an ``async def`` route directly would stall the
+    entire FastAPI worker for the duration of the slowest probe — one
+    misbehaving provider could pin every request. Wrap in a threadpool.
+    """
+    from hermes_cli.models import (
+        curated_models_for_provider,
+        list_available_providers,
+    )
+
+    return (
+        curated_models_for_provider(effective_provider),
+        list_available_providers(),
+    )
+
+
 @router.get("/api/available-models", response_model=AvailableModelsResponse)
 async def available_models(
     provider: Optional[str] = Query(None),
@@ -49,19 +70,13 @@ async def available_models(
     then static catalog fallback. If ``provider`` is omitted, uses the
     currently configured provider.
     """
-    from hermes_cli.models import (
-        curated_models_for_provider,
-        list_available_providers,
-    )
-
     effective_provider = provider
     if not effective_provider:
         from webapi.deps import get_runtime_agent_kwargs
         runtime = get_runtime_agent_kwargs()
         effective_provider = runtime.get("provider", "anthropic")
 
-    models = curated_models_for_provider(effective_provider)
-    providers = list_available_providers()
+    models, providers = await run_in_threadpool(_resolve_models, effective_provider)
 
     return AvailableModelsResponse(
         provider=effective_provider,
