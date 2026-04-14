@@ -231,17 +231,22 @@ class ConfigPatch(BaseModel):
     mcp_servers: dict[str, Any] | None = None
 
 
-# Fields whose .env values are safe to expose as-is (user lists, not
-# secrets). GET /api/config returns the actual comma-separated value
-# split into an array so the frontend can display and re-edit them.
+# Fields whose .env values are safe to expose as-is (not secrets).
 # All other credential fields (tokens, keys) are returned as boolean
 # true/false to avoid leaking secrets.
-_LIST_CREDENTIAL_FIELDS: frozenset[str] = frozenset({
+#
+# _ARRAY_FIELDS: comma-separated in .env, returned as array to frontend
+# _STRING_FIELDS: single string value, returned as-is
+_ARRAY_CREDENTIAL_FIELDS: frozenset[str] = frozenset({
     "allowed_usernames",
     "allowed_open_ids",
+})
+_STRING_CREDENTIAL_FIELDS: frozenset[str] = frozenset({
     "home_channel",
     "home_room",
     "home_address",
+    "url",
+    "homeserver",
 })
 
 
@@ -261,14 +266,16 @@ def _build_credential_enrichment() -> dict[str, dict[str, Any]]:
         plat_data: dict[str, Any] = {}
         for field_name, env_var in cred_map.items():
             raw = get_env_value(env_var)
-            if field_name in _LIST_CREDENTIAL_FIELDS:
-                # Return actual value (safe to expose — not a secret)
+            if field_name in _ARRAY_CREDENTIAL_FIELDS:
+                # Comma-separated list → always return as array so
+                # frontend Array.isArray() works consistently.
                 if not raw:
                     plat_data[field_name] = None
-                elif "," in raw:
-                    plat_data[field_name] = [v.strip() for v in raw.split(",") if v.strip()]
                 else:
-                    plat_data[field_name] = raw
+                    plat_data[field_name] = [v.strip() for v in raw.split(",") if v.strip()]
+            elif field_name in _STRING_CREDENTIAL_FIELDS:
+                # Single string value — safe to expose as-is
+                plat_data[field_name] = raw or None
             else:
                 # Secret field — boolean only
                 plat_data[field_name] = bool(raw)
