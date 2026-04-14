@@ -207,6 +207,11 @@ def _install_stubs() -> None:
         "provider": "stub",
     }
     sys.modules["hermes_cli.config"].save_config = lambda c: None  # type: ignore[attr-defined]
+    # Credential management stubs — config.py imports these for .env routing
+    _fake_env: dict[str, str] = {}
+    sys.modules["hermes_cli.config"].get_env_value = lambda k: _fake_env.get(k)  # type: ignore[attr-defined]
+    sys.modules["hermes_cli.config"].save_env_value = lambda k, v: _fake_env.__setitem__(k, v)  # type: ignore[attr-defined]
+    sys.modules["hermes_cli.config"].remove_env_value = lambda k: _fake_env.pop(k, None)  # type: ignore[attr-defined]
     sys.modules["tools.skills_tool"].skill_view = lambda **k: json.dumps(  # type: ignore[attr-defined]
         {"success": True, "content": "# skill"}
     )
