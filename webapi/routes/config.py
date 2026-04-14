@@ -231,19 +231,49 @@ class ConfigPatch(BaseModel):
     mcp_servers: dict[str, Any] | None = None
 
 
+# Fields whose .env values are safe to expose as-is (user lists, not
+# secrets). GET /api/config returns the actual comma-separated value
+# split into an array so the frontend can display and re-edit them.
+# All other credential fields (tokens, keys) are returned as boolean
+# true/false to avoid leaking secrets.
+_LIST_CREDENTIAL_FIELDS: frozenset[str] = frozenset({
+    "allowed_usernames",
+    "allowed_open_ids",
+    "home_channel",
+    "home_room",
+    "home_address",
+})
+
+
 # ---------------------------------------------------------------------------
 # Credential status for GET
 # ---------------------------------------------------------------------------
 
-def _build_credential_status() -> dict[str, dict[str, bool]]:
-    """Check which platform credentials are set in .env (without exposing values)."""
-    status: dict[str, dict[str, bool]] = {}
+def _build_credential_enrichment() -> dict[str, dict[str, Any]]:
+    """Build credential info to inject into GET /api/config response.
+
+    - Secret fields (tokens, keys): boolean true/false (never expose value)
+    - List fields (allowed users, home channel): actual value as array/string
+      so the frontend can display and re-edit them
+    """
+    result: dict[str, dict[str, Any]] = {}
     for platform, cred_map in _CREDENTIAL_ENV_MAP.items():
-        plat_status: dict[str, bool] = {}
+        plat_data: dict[str, Any] = {}
         for field_name, env_var in cred_map.items():
-            plat_status[field_name] = bool(get_env_value(env_var))
-        status[platform] = plat_status
-    return status
+            raw = get_env_value(env_var)
+            if field_name in _LIST_CREDENTIAL_FIELDS:
+                # Return actual value (safe to expose — not a secret)
+                if not raw:
+                    plat_data[field_name] = None
+                elif "," in raw:
+                    plat_data[field_name] = [v.strip() for v in raw.split(",") if v.strip()]
+                else:
+                    plat_data[field_name] = raw
+            else:
+                # Secret field — boolean only
+                plat_data[field_name] = bool(raw)
+        result[platform] = plat_data
+    return result
 
 
 @router.get("", response_model=ConfigResponse)
@@ -261,15 +291,15 @@ async def get_web_config() -> ConfigResponse:
     # secrets. Always uses the .env status as source of truth — even if
     # an old config.yaml had a plaintext credential, the boolean from
     # .env takes precedence.
-    cred_status = await run_in_threadpool(_build_credential_status)
+    cred_data = await run_in_threadpool(_build_credential_enrichment)
     enriched = dict(cfg)
-    for platform, fields in cred_status.items():
+    for platform, fields in cred_data.items():
         section = dict(enriched.get(platform, {})) if isinstance(enriched.get(platform), dict) else {}
-        for field_name, is_set in fields.items():
-            # Always overwrite with boolean — env var is the source of
-            # truth, and we must never leak a plaintext credential that
+        for field_name, value in fields.items():
+            # Always overwrite — .env is the source of truth for
+            # credentials. Prevents leaking plaintext tokens that
             # might linger in an old config.yaml.
-            section[field_name] = is_set
+            section[field_name] = value
         enriched[platform] = section
 
     return ConfigResponse(
