@@ -355,22 +355,27 @@ def _extract_credentials(
 def _apply_config_patch(patch: ConfigPatch) -> ConfigPatchResponse:
     """Apply a config patch: credentials → .env, behaviour → config.yaml.
 
-    Transaction order: config.yaml first (less likely to fail since it's
-    just a dict merge + YAML dump), then .env writes. If .env fails after
-    config.yaml succeeds, the YAML change is still persisted — a partial
-    success is better than rolling back a valid YAML write.
+    Only writes config.yaml when there are actual YAML changes (top-level
+    model/provider/base_url or behaviour fields in platform sections).
+    Credential-only patches skip the YAML write entirely and go straight
+    to .env — this avoids triggering save_config's normalize + atomic
+    write when the config dict hasn't actually changed.
     """
+    yaml_dirty = False
     config = load_config()
 
     if patch.model is not None:
         config["model"] = patch.model
+        yaml_dirty = True
     if patch.provider is not None:
         config["provider"] = patch.provider
+        yaml_dirty = True
     if patch.base_url is not None:
         if patch.base_url.strip():
             config["base_url"] = patch.base_url.strip()
         else:
             config.pop("base_url", None)
+        yaml_dirty = True
 
     patch_dict = patch.model_dump(exclude_none=True)
     pending_env: list[tuple[str, str | None]] = []
@@ -382,7 +387,6 @@ def _apply_config_patch(patch: ConfigPatch) -> ConfigPatchResponse:
 
         yaml_fields, env_updates = _extract_credentials(section, section_patch)
 
-        # Collect env writes for after config.yaml save
         for env_var, env_val in env_updates.items():
             pending_env.append((env_var, env_val))
 
@@ -391,11 +395,13 @@ def _apply_config_patch(patch: ConfigPatch) -> ConfigPatchResponse:
             if not isinstance(existing, dict):
                 existing = {}
             config[section] = _deep_merge(existing, yaml_fields)
+            yaml_dirty = True
 
-    # Step 1: save config.yaml (atomic write)
-    save_config(config)
+    # Step 1: save config.yaml only if there are actual YAML changes
+    if yaml_dirty:
+        save_config(config)
 
-    # Step 2: write credentials to .env (atomic per-key)
+    # Step 2: write credentials to .env
     for env_var, env_val in pending_env:
         if env_val is None:
             remove_env_value(env_var)
