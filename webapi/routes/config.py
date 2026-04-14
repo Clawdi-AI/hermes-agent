@@ -1,11 +1,18 @@
 import logging
+import os
 from typing import Any
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
 
-from hermes_cli.config import load_config, save_config
+from hermes_cli.config import (
+    get_env_value,
+    load_config,
+    save_config,
+    save_env_value,
+    remove_env_value,
+)
 from webapi.deps import get_config, get_runtime_agent_kwargs, get_runtime_model
 from webapi.models.config import ConfigPatchResponse, ConfigResponse
 
@@ -114,6 +121,17 @@ class ConfigPatch(BaseModel):
     mcp_servers: dict[str, Any] | None = None
 
 
+def _build_credential_status() -> dict[str, dict[str, bool]]:
+    """Check which platform credentials are set in .env (without exposing values)."""
+    status: dict[str, dict[str, bool]] = {}
+    for platform, cred_map in _CREDENTIAL_ENV_MAP.items():
+        plat_status: dict[str, bool] = {}
+        for field_name, env_var in cred_map.items():
+            plat_status[field_name] = bool(get_env_value(env_var))
+        status[platform] = plat_status
+    return status
+
+
 @router.get("", response_model=ConfigResponse)
 async def get_web_config() -> ConfigResponse:
     runtime = get_runtime_agent_kwargs()
@@ -123,22 +141,119 @@ async def get_web_config() -> ConfigResponse:
         model_str = raw_model.get("default", raw_model.get("model", str(raw_model)))
     else:
         model_str = raw_model
-    # ``get_config`` is a cached in-memory dict accessor (no disk IO),
-    # so it's safe to call directly from an async handler.
+
+    cfg = get_config()
+    # Inject credential status into the config dict so the dashboard
+    # can show configured/unconfigured state without exposing secrets.
+    # This is merged into the ``config`` field (not a separate key) so
+    # the existing ``hermesConfigToDeploymentConfig`` mapper in the
+    # frontend picks it up transparently via ``cfg.telegram.bot_token``
+    # being truthy/falsy.
+    cred_status = await run_in_threadpool(_build_credential_status)
+    enriched = dict(cfg)
+    for platform, fields in cred_status.items():
+        section = dict(enriched.get(platform, {})) if isinstance(enriched.get(platform), dict) else {}
+        for field_name, is_set in fields.items():
+            # Only inject if the field is NOT already in config.yaml
+            # (env var is the source of truth for credentials)
+            if field_name not in section:
+                section[field_name] = is_set  # True/False, not the actual value
+        enriched[platform] = section
+
     return ConfigResponse(
         model=model_str,
         provider=runtime.get("provider"),
         api_mode=runtime.get("api_mode"),
         base_url=runtime.get("base_url"),
-        config=get_config(),
+        config=enriched,
     )
+
+
+# Mapping from config.yaml platform field names → .env var names.
+# Hermes reads credentials from env vars (via ~/.hermes/.env), NOT from
+# config.yaml. When a dashboard sends `{telegram: {bot_token: "xxx"}}`,
+# we extract the credential fields, write them to .env, and only merge
+# the remaining behaviour fields (require_mention, etc.) into config.yaml.
+_CREDENTIAL_ENV_MAP: dict[str, dict[str, str]] = {
+    "telegram": {
+        "bot_token": "TELEGRAM_BOT_TOKEN",
+        "allowed_usernames": "TELEGRAM_ALLOWED_USERS",
+        "home_channel": "TELEGRAM_HOME_CHANNEL",
+    },
+    "discord": {
+        "bot_token": "DISCORD_BOT_TOKEN",
+        "allowed_usernames": "DISCORD_ALLOWED_USERS",
+        "home_channel": "DISCORD_HOME_CHANNEL",
+    },
+    "slack": {
+        "bot_token": "SLACK_BOT_TOKEN",
+        "app_token": "SLACK_APP_TOKEN",
+        "allowed_usernames": "SLACK_ALLOWED_USERS",
+        "home_channel": "SLACK_HOME_CHANNEL",
+    },
+    "feishu": {
+        "app_id": "FEISHU_APP_ID",
+        "app_secret": "FEISHU_APP_SECRET",
+        "allowed_open_ids": "FEISHU_ALLOWED_USERS",
+        "home_channel": "FEISHU_HOME_CHANNEL",
+    },
+    "dingtalk": {
+        "client_id": "DINGTALK_CLIENT_ID",
+        "client_secret": "DINGTALK_CLIENT_SECRET",
+    },
+    "whatsapp": {
+        "allowed_usernames": "WHATSAPP_ALLOWED_USERS",
+    },
+    "matrix": {
+        "access_token": "MATRIX_ACCESS_TOKEN",
+        "homeserver": "MATRIX_HOMESERVER",
+        "user_id": "MATRIX_USER_ID",
+        "allowed_usernames": "MATRIX_ALLOWED_USERS",
+    },
+}
+
+
+def _extract_credentials(
+    section: str, section_patch: dict[str, Any]
+) -> tuple[dict[str, Any], dict[str, str | None]]:
+    """Split a platform section patch into (yaml_fields, env_updates).
+
+    Returns:
+        yaml_fields: dict to deep-merge into config.yaml (behaviour only)
+        env_updates: dict of {ENV_VAR: value_or_None} to write to .env
+    """
+    cred_map = _CREDENTIAL_ENV_MAP.get(section, {})
+    yaml_fields: dict[str, Any] = {}
+    env_updates: dict[str, str | None] = {}
+
+    for key, value in section_patch.items():
+        env_var = cred_map.get(key)
+        if env_var is not None:
+            # Credential field → route to .env
+            if value is None:
+                env_updates[env_var] = None  # delete
+            elif isinstance(value, list):
+                # Arrays (allowed_usernames, allowed_open_ids) → comma-joined
+                env_updates[env_var] = ",".join(str(v) for v in value)
+            else:
+                env_updates[env_var] = str(value)
+        else:
+            # Behaviour field → keep in config.yaml
+            yaml_fields[key] = value
+
+    return yaml_fields, env_updates
 
 
 def _apply_config_patch(patch: ConfigPatch) -> ConfigPatchResponse:
     """Pure-sync routine that loads, merges, and saves the YAML config.
 
+    Credential fields (bot tokens, API keys, allowed user lists) are
+    extracted from platform sections and written to ``~/.hermes/.env``
+    via ``save_env_value()``. Only behaviour fields (require_mention,
+    auto_thread, etc.) are deep-merged into config.yaml.
+
     Wrapped in ``run_in_threadpool`` by the route handler so the
-    blocking YAML disk IO doesn't stall the event loop.
+    blocking disk IO doesn't stall the event loop.
     """
     config = load_config()
 
@@ -155,14 +270,31 @@ def _apply_config_patch(patch: ConfigPatch) -> ConfigPatchResponse:
 
     # Nested sections: deep-merge any that were supplied
     patch_dict = patch.model_dump(exclude_none=True)
+    env_changed = False
     for section in _MERGEABLE_SECTIONS:
         section_patch = patch_dict.get(section)
         if section_patch is None:
             continue
-        existing = config.get(section)
-        if not isinstance(existing, dict):
-            existing = {}
-        config[section] = _deep_merge(existing, section_patch)
+
+        # Split credential fields → .env, behaviour fields → config.yaml
+        yaml_fields, env_updates = _extract_credentials(section, section_patch)
+
+        # Write credentials to .env
+        for env_var, env_val in env_updates.items():
+            if env_val is None:
+                remove_env_value(env_var)
+                os.environ.pop(env_var, None)
+            else:
+                save_env_value(env_var, env_val)
+                os.environ[env_var] = env_val
+            env_changed = True
+
+        # Merge remaining behaviour fields into config.yaml
+        if yaml_fields:
+            existing = config.get(section)
+            if not isinstance(existing, dict):
+                existing = {}
+            config[section] = _deep_merge(existing, yaml_fields)
 
     save_config(config)
     return ConfigPatchResponse(
