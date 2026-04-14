@@ -364,17 +364,33 @@ def _apply_config_patch(patch: ConfigPatch) -> ConfigPatchResponse:
     yaml_dirty = False
     config = load_config()
 
+    # After load_config, model may be a dict {"default": "...", "provider": "...",
+    # "base_url": "..."}. Patch into the right place so save_config's normalize
+    # doesn't lose the nested provider/base_url when we only change the model name.
+    existing_model = config.get("model")
     if patch.model is not None:
-        config["model"] = patch.model
+        if isinstance(existing_model, dict):
+            existing_model["default"] = patch.model
+        else:
+            config["model"] = patch.model
         yaml_dirty = True
     if patch.provider is not None:
-        config["provider"] = patch.provider
+        if isinstance(existing_model, dict):
+            existing_model["provider"] = patch.provider
+        else:
+            config["provider"] = patch.provider
         yaml_dirty = True
     if patch.base_url is not None:
         if patch.base_url.strip():
-            config["base_url"] = patch.base_url.strip()
+            if isinstance(existing_model, dict):
+                existing_model["base_url"] = patch.base_url.strip()
+            else:
+                config["base_url"] = patch.base_url.strip()
         else:
-            config.pop("base_url", None)
+            if isinstance(existing_model, dict):
+                existing_model.pop("base_url", None)
+            else:
+                config.pop("base_url", None)
         yaml_dirty = True
 
     patch_dict = patch.model_dump(exclude_none=True)
@@ -410,10 +426,25 @@ def _apply_config_patch(patch: ConfigPatch) -> ConfigPatchResponse:
             save_env_value(env_var, env_val)
             os.environ[env_var] = env_val
 
+    # After load_config() + _normalize_root_model_keys, the config may have:
+    #   model: {"default": "gpt-5.4", "provider": "openai", "base_url": "..."}
+    # with root-level provider/base_url removed. Extract scalar values for
+    # ConfigPatchResponse which expects str|None for all three fields.
+    raw_model = config.get("model")
+    if isinstance(raw_model, dict):
+        model_str = raw_model.get("default") or raw_model.get("model")
+        # provider/base_url may have been migrated into the model dict
+        resp_provider = config.get("provider") or raw_model.get("provider")
+        resp_base_url = config.get("base_url") or raw_model.get("base_url")
+    else:
+        model_str = raw_model
+        resp_provider = config.get("provider")
+        resp_base_url = config.get("base_url")
+
     return ConfigPatchResponse(
-        model=config.get("model"),
-        provider=config.get("provider"),
-        base_url=config.get("base_url"),
+        model=model_str,
+        provider=resp_provider,
+        base_url=resp_base_url,
         merged_sections=[
             section for section in _MERGEABLE_SECTIONS if patch_dict.get(section) is not None
         ],
@@ -437,13 +468,6 @@ async def patch_web_config(patch: ConfigPatch) -> ConfigPatchResponse:
     """
     try:
         return await run_in_threadpool(_apply_config_patch, patch)
-    except Exception as exc:
-        import traceback
-        tb = traceback.format_exc()
+    except Exception:
         logger.exception("[webapi.config] patch_web_config failed")
-        # Temporarily include traceback for debugging CVM 500 errors.
-        # TODO: remove before production — only expose generic message.
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to update config: {type(exc).__name__}: {exc}\n{tb}",
-        )
+        raise HTTPException(status_code=500, detail="Failed to update config")
