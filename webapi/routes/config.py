@@ -437,6 +437,13 @@ async def patch_web_config(patch: ConfigPatch) -> ConfigPatchResponse:
     """
     try:
         return await run_in_threadpool(_apply_config_patch, patch)
-    except Exception:
+    except Exception as exc:
+        import traceback
+        tb = traceback.format_exc()
         logger.exception("[webapi.config] patch_web_config failed")
-        raise HTTPException(status_code=500, detail="Failed to update config")
+        # Temporarily include traceback for debugging CVM 500 errors.
+        # TODO: remove before production — only expose generic message.
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to update config: {type(exc).__name__}: {exc}\n{tb}",
+        )
