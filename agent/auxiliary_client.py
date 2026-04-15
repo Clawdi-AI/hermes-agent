@@ -945,7 +945,11 @@ def _try_codex_from_config() -> Tuple[Optional[Any], Optional[str]]:
     try:
         from hermes_cli.config import load_config
         cfg = load_config()
-    except Exception:
+    except Exception as exc:
+        logger.warning(
+            "Codex direct config: load_config() failed, falling back to OAuth: %s",
+            exc,
+        )
         return None, None
     model_cfg = cfg.get("model") if isinstance(cfg, dict) else None
     if not isinstance(model_cfg, dict):
@@ -1438,6 +1442,33 @@ def resolve_provider_client(
 
     # ── OpenAI Codex (OAuth → Responses API) ─────────────────────────
     if provider == "openai-codex":
+        # Direct-credentials path: when the caller passed an explicit
+        # api_key (e.g., from a fallback_providers entry, a CLI override,
+        # or the runtime provider resolver after PR #2), use those values
+        # straight away instead of going through OAuth. Otherwise
+        # `raw_codex=True` and other explicit-credential code paths would
+        # silently fail in reverse-proxied deployments that have no
+        # local Codex auth state.
+        if explicit_api_key:
+            codex_base = (
+                (explicit_base_url or "").strip().rstrip("/")
+                or _CODEX_AUX_BASE_URL
+            )
+            final_model = _normalize_resolved_model(
+                model or _CODEX_AUX_MODEL, provider,
+            )
+            raw_client = OpenAI(
+                api_key=explicit_api_key.strip(), base_url=codex_base,
+            )
+            if raw_codex:
+                return (raw_client, final_model)
+            wrapped = CodexAuxiliaryClient(raw_client, final_model)
+            return (
+                _to_async_client(wrapped, final_model)
+                if async_mode
+                else (wrapped, final_model)
+            )
+
         if raw_codex:
             # Return the raw OpenAI client for callers that need direct
             # access to responses.stream() (e.g., the main agent loop).
