@@ -760,6 +760,22 @@ def resolve_runtime_provider(
                         "falling through to next provider.")
 
     if provider == "openai-codex":
+        # Direct config: explicit api_key in config.yaml (e.g. sub2api proxy).
+        # Takes priority over OAuth credentials from hermes-auth-store.
+        cfg_api_key = str(model_cfg.get("api_key") or "").strip()
+        if cfg_api_key:
+            cfg_base_url = (
+                str(model_cfg.get("base_url") or "").strip().rstrip("/")
+            )
+            return {
+                "provider": "openai-codex",
+                "api_mode": "codex_responses",
+                "base_url": cfg_base_url or DEFAULT_CODEX_BASE_URL,
+                "api_key": cfg_api_key,
+                "source": "config",
+                "requested_provider": requested_provider,
+            }
+        # Fallback: OAuth credentials from hermes-auth-store
         try:
             creds = resolve_codex_runtime_credentials()
             return {
