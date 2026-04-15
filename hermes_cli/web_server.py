@@ -64,11 +64,21 @@ _log = logging.getLogger(__name__)
 app = FastAPI(title="Hermes Agent", version=__version__)
 
 # ---------------------------------------------------------------------------
-# Session token for protecting sensitive endpoints (reveal).
-# Generated fresh on every server start — dies when the process exits.
-# Injected into the SPA HTML so only the legitimate web UI can use it.
+# Session token for protecting sensitive /api/* endpoints.
+#
+# By default, generated fresh on every server start and dies with the
+# process — injected into the SPA HTML so the legitimate same-origin
+# web UI picks it up without any external coordination. This is the
+# single-user ``hermes web`` flow: one process, one SPA, same token.
+#
+# For reverse-proxied deployments where the UI lives on a different
+# origin (e.g. a platform dashboard talking to many per-pod Hermes
+# instances over the network), the downstream caller can't read the
+# HTML injection, so it sets ``HERMES_SESSION_TOKEN`` to a stable
+# value both sides share. Falls back to the random default when the
+# env var is unset, preserving stand-alone CLI behavior.
 # ---------------------------------------------------------------------------
-_SESSION_TOKEN = secrets.token_urlsafe(32)
+_SESSION_TOKEN = os.environ.get("HERMES_SESSION_TOKEN") or secrets.token_urlsafe(32)
 
 # Simple rate limiter for the reveal endpoint
 _reveal_timestamps: List[float] = []
