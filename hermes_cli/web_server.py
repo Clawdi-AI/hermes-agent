@@ -738,6 +738,12 @@ async def get_env_vars():
         result[var_name] = {
             "is_set": bool(value),
             "redacted_value": redact_key(value) if value else None,
+            # Plain value for non-secret fields (allow-lists, mode flags,
+            # account IDs, etc.) so dashboards can round-trip them in
+            # form inputs without forcing the user to retype on every
+            # edit. Password-flagged fields stay None and must still go
+            # through the rate-limited /api/env/reveal endpoint.
+            "value": value if (value and not info.get("password", False)) else None,
             "description": info.get("description", ""),
             "url": info.get("url"),
             "category": info.get("category", ""),

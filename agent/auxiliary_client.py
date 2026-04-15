@@ -918,7 +918,67 @@ def _try_custom_endpoint() -> Tuple[Optional[OpenAI], Optional[str]]:
     return OpenAI(api_key=custom_key, base_url=custom_base), model
 
 
+def _try_codex_from_config() -> Tuple[Optional[Any], Optional[str]]:
+    """Build a Codex auxiliary client from config.yaml ``model.api_key``.
+
+    This is the auxiliary-side mirror of the Direct config path that
+    ``runtime_provider.py`` added in PR #2 — it lets reverse-proxied
+    deployments (e.g. a sub2api-compatible endpoint with a static API
+    key but no local OAuth state) use auxiliary tasks without going
+    through the Codex device-code flow.
+
+    Activation is **strictly opt-in**: only triggers when the operator
+    has explicitly set ``model.provider == "openai-codex"`` AND
+    ``model.api_key`` to a non-empty value. Single-user CLI workflows
+    (where ``api_key`` is empty and OAuth tokens live in the auth store)
+    are never touched and continue to follow the unchanged code path
+    below.
+
+    The auxiliary model defaults to ``model.default`` (the operator's
+    main model) rather than ``_CODEX_AUX_MODEL``, because in
+    direct-config mode the only models guaranteed to exist are the ones
+    the operator's reverse proxy actually serves — which is what
+    ``model.default`` describes. Per-task ``auxiliary.{task}.model``
+    overrides still win because the caller propagates them via
+    ``model or default``.
+    """
+    try:
+        from hermes_cli.config import load_config
+        cfg = load_config()
+    except Exception:
+        return None, None
+    model_cfg = cfg.get("model") if isinstance(cfg, dict) else None
+    if not isinstance(model_cfg, dict):
+        return None, None
+    if str(model_cfg.get("provider") or "").strip().lower() != "openai-codex":
+        return None, None
+    api_key = str(model_cfg.get("api_key") or "").strip()
+    if not api_key:
+        return None, None
+    base_url = (
+        str(model_cfg.get("base_url") or "").strip().rstrip("/")
+        or _CODEX_AUX_BASE_URL
+    )
+    model_name = (
+        str(model_cfg.get("default") or "").strip() or _CODEX_AUX_MODEL
+    )
+    logger.debug(
+        "Auxiliary client: Codex direct config (%s at %s)",
+        model_name, base_url[:60],
+    )
+    real_client = OpenAI(api_key=api_key, base_url=base_url)
+    return CodexAuxiliaryClient(real_client, model_name), model_name
+
+
 def _try_codex() -> Tuple[Optional[Any], Optional[str]]:
+    # Direct config path: when the operator pinned an explicit api_key
+    # in config.yaml, use it instead of OAuth. This lets reverse-proxied
+    # Hermes deployments use auxiliary tasks without the device-code
+    # flow. Falls through to the OAuth path below when api_key is empty.
+    direct_client, direct_model = _try_codex_from_config()
+    if direct_client is not None:
+        return direct_client, direct_model
+
     pool_present, entry = _select_pool_entry("openai-codex")
     if pool_present:
         codex_token = _pool_runtime_api_key(entry)
