@@ -46,7 +46,22 @@ from hermes_cli.config import (
     check_config_version,
     redact_key,
 )
+from hermes_cli.env_loader import load_hermes_dotenv
 from gateway.status import get_running_pid, read_runtime_status
+
+# Load `~/.hermes/.env` into ``os.environ`` before any module-level reads
+# of ``HERMES_SESSION_TOKEN`` (or any other secret used by this module).
+#
+# The `hermes` CLI entry point already does this in ``hermes_cli/main.py``,
+# but the standalone uvicorn launcher (``uvicorn hermes_cli.web_server:app``)
+# bypasses ``main.py`` and so never gets a chance to load the dotenv file.
+# Without this call, reverse-proxied deployments that store
+# ``HERMES_SESSION_TOKEN`` in ``~/.hermes/.env`` would silently fall back
+# to the random token and break cross-origin auth on every restart.
+#
+# The ``project_env`` argument mirrors the CLI's call site so development
+# checkouts see the same precedence order in both launch paths.
+load_hermes_dotenv(project_env=PROJECT_ROOT / ".env")
 
 try:
     from fastapi import FastAPI, HTTPException, Request
@@ -66,11 +81,21 @@ _log = logging.getLogger(__name__)
 app = FastAPI(title="Hermes Agent", version=__version__)
 
 # ---------------------------------------------------------------------------
-# Session token for protecting sensitive endpoints (reveal).
-# Generated fresh on every server start — dies when the process exits.
-# Injected into the SPA HTML so only the legitimate web UI can use it.
+# Session token for protecting sensitive /api/* endpoints.
+#
+# By default, generated fresh on every server start and dies with the
+# process — injected into the SPA HTML so the legitimate same-origin
+# web UI picks it up without any external coordination. This is the
+# single-user ``hermes web`` flow: one process, one SPA, same token.
+#
+# For reverse-proxied deployments where the UI lives on a different
+# origin (e.g. a platform dashboard talking to many per-pod Hermes
+# instances over the network), the downstream caller can't read the
+# HTML injection, so it sets ``HERMES_SESSION_TOKEN`` to a stable
+# value both sides share. Falls back to the random default when the
+# env var is unset, preserving stand-alone CLI behavior.
 # ---------------------------------------------------------------------------
-_SESSION_TOKEN = secrets.token_urlsafe(32)
+_SESSION_TOKEN = os.environ.get("HERMES_SESSION_TOKEN") or secrets.token_urlsafe(32)
 _SESSION_HEADER_NAME = "X-Hermes-Session-Token"
 
 # Simple rate limiter for the reveal endpoint
@@ -975,13 +1000,21 @@ async def get_env_vars():
     result = {}
     for var_name, info in OPTIONAL_ENV_VARS.items():
         value = env_on_disk.get(var_name)
+        is_password = info.get("password", False)
         result[var_name] = {
             "is_set": bool(value),
             "redacted_value": redact_key(value) if value else None,
+            # Plain on-disk value for non-secret fields (allow-lists,
+            # mode flags, account IDs). Lets reverse-proxied dashboards
+            # round-trip these in form inputs without forcing the user
+            # to retype on every edit. Password-flagged fields stay None
+            # and must still go through the rate-limited /api/env/reveal
+            # endpoint with audit logging.
+            "value": value if (value and not is_password) else None,
             "description": info.get("description", ""),
             "url": info.get("url"),
             "category": info.get("category", ""),
-            "is_password": info.get("password", False),
+            "is_password": is_password,
             "tools": info.get("tools", []),
             "advanced": info.get("advanced", False),
         }

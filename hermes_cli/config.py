@@ -1751,6 +1751,21 @@ OPTIONAL_ENV_VARS = {
         "prompt": "QQ Sandbox Mode",
         "category": "messaging",
     },
+    # Feishu credentials (FEISHU_APP_ID / FEISHU_APP_SECRET / etc.) live
+    # in `_EXTRA_ENV_KEYS` because the canonical Feishu config path is
+    # `config.platforms.feishu.extra` (not env vars). The allow-list is
+    # the exception: `gateway/platforms/feishu.py` reads it ONLY from
+    # `os.getenv("FEISHU_ALLOWED_USERS")` (no `extra.allowed_users`
+    # fallback), so users have no way to set it without env support.
+    # Surface it here so the dashboard can display and round-trip the
+    # current list like the other platforms' allowed-users entries.
+    "FEISHU_ALLOWED_USERS": {
+        "description": "Comma-separated Feishu open IDs allowed to use the bot",
+        "prompt": "Allowed Feishu open IDs (comma-separated)",
+        "url": "https://open.feishu.cn",
+        "password": False,
+        "category": "messaging",
+    },
     "GATEWAY_ALLOW_ALL_USERS": {
         "description": "Allow all users to interact with messaging bots (true/false). Default: false.",
         "prompt": "Allow all users (true/false)",
