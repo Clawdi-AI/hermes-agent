@@ -18,7 +18,12 @@
  *   node bridge.js --port 3000 --session ~/.hermes/whatsapp/session
  */
 
-import { makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion, downloadMediaMessage } from '@whiskeysockets/baileys';
+// `baileys` resolves to github:Clawdi-AI/Baileys#msg-router in
+// package.json. That fork is vanilla upstream plus one commit that
+// adds an `authCert` SocketConfig override, used when pointing the
+// bridge at a reverse-proxy like clawdi-ai/msg-router. Unset `authCert`
+// keeps WA's pinned cert behavior identical to upstream.
+import { makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion, downloadMediaMessage } from 'baileys';
 import express from 'express';
 import { Boom } from '@hapi/boom';
 import pino from 'pino';
@@ -48,6 +53,24 @@ const DOCUMENT_CACHE_DIR = path.join(process.env.HOME || '~', '.hermes', 'docume
 const AUDIO_CACHE_DIR = path.join(process.env.HOME || '~', '.hermes', 'audio_cache');
 const PAIR_ONLY = args.includes('--pair-only');
 const WHATSAPP_MODE = getArg('mode', process.env.WHATSAPP_MODE || 'self-chat'); // "bot" or "self-chat"
+
+// Optional reverse-proxy overrides (e.g. pointing Baileys at a
+// msg-router Noise WS emulator instead of WA). All three are supplied
+// together by the caller; partial overrides are treated as unset to
+// avoid a half-configured handshake.
+const WA_WS_URL = getArg('ws-url', process.env.WHATSAPP_WS_URL || '');
+const WA_AUTH_CERT_PUBKEY_HEX = getArg(
+  'auth-cert-pubkey-hex',
+  process.env.WHATSAPP_AUTH_CERT_PUBKEY_HEX || '',
+);
+const WA_AUTH_CERT_SERIAL = parseInt(
+  getArg('auth-cert-serial', process.env.WHATSAPP_AUTH_CERT_SERIAL || '0'),
+  10,
+);
+const WA_AUTH_CERT_ISSUER = getArg(
+  'auth-cert-issuer',
+  process.env.WHATSAPP_AUTH_CERT_ISSUER || 'msg-router',
+);
 const ALLOWED_USERS = parseAllowedUsers(process.env.WHATSAPP_ALLOWED_USERS || '');
 const DEFAULT_REPLY_PREFIX = '⚕ *Hermes Agent*\n────────────\n';
 const REPLY_PREFIX = process.env.WHATSAPP_REPLY_PREFIX === undefined
@@ -124,6 +147,26 @@ async function startSocket() {
   const { state, saveCreds } = await useMultiFileAuthState(SESSION_DIR);
   const { version } = await fetchLatestBaileysVersion();
 
+  // Build optional reverse-proxy SocketConfig overrides. msg-router
+  // emulates WA at both the Noise transport and Signal layers, signing
+  // handshake certs with its own root key — which Baileys's stock
+  // cert-pin path rejects. Our fork adds `authCert` so clients can
+  // pin msg-router's root instead.
+  const extraSockConfig = {};
+  if (WA_WS_URL) {
+    extraSockConfig.waWebSocketUrl = WA_WS_URL;
+  }
+  if (WA_AUTH_CERT_PUBKEY_HEX) {
+    extraSockConfig.authCert = {
+      SERIAL: WA_AUTH_CERT_SERIAL,
+      ISSUER: WA_AUTH_CERT_ISSUER,
+      PUBLIC_KEY: Buffer.from(WA_AUTH_CERT_PUBKEY_HEX, 'hex'),
+    };
+    console.log(
+      `[bridge] using custom waWebSocketUrl=${WA_WS_URL || '<default>'} with authCert serial=${WA_AUTH_CERT_SERIAL} issuer=${WA_AUTH_CERT_ISSUER}`,
+    );
+  }
+
   sock = makeWASocket({
     version,
     auth: state,
@@ -139,6 +182,7 @@ async function startSocket() {
       // This is enough for Baileys to complete the retry handshake.
       return { conversation: '' };
     },
+    ...extraSockConfig,
   });
 
   sock.ev.on('creds.update', () => { saveCreds(); lidToPhone = buildLidMap(); });

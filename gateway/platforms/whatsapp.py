@@ -362,14 +362,40 @@ class WhatsAppAdapter(BasePlatformAdapter):
             if self._reply_prefix is not None:
                 bridge_env["WHATSAPP_REPLY_PREFIX"] = self._reply_prefix
 
+            # Optional reverse-proxy overrides. `platforms.whatsapp.extra.ws_url`
+            # points Baileys at a WA-emulating proxy (e.g. clawdi-ai/msg-router);
+            # `auth_cert_pubkey_hex` + `auth_cert_serial` + `auth_cert_issuer`
+            # describe the proxy's root cert that Baileys should pin. All three
+            # flow through as CLI flags to the bridge; the bridge treats a
+            # missing pubkey as "no override" and keeps the stock WA cert pin.
+            bridge_argv = [
+                "node",
+                str(bridge_path),
+                "--port", str(self._bridge_port),
+                "--session", str(self._session_path),
+                "--mode", whatsapp_mode,
+            ]
+            extra = self.config.extra or {}
+            ws_url = extra.get("ws_url") or os.environ.get("WHATSAPP_WS_URL")
+            auth_cert_pubkey_hex = (
+                extra.get("auth_cert_pubkey_hex")
+                or os.environ.get("WHATSAPP_AUTH_CERT_PUBKEY_HEX")
+            )
+            if ws_url:
+                bridge_argv.extend(["--ws-url", str(ws_url)])
+            if auth_cert_pubkey_hex:
+                bridge_argv.extend(["--auth-cert-pubkey-hex", str(auth_cert_pubkey_hex)])
+                auth_cert_serial = extra.get("auth_cert_serial")
+                if auth_cert_serial is None:
+                    auth_cert_serial = os.environ.get("WHATSAPP_AUTH_CERT_SERIAL", "0")
+                bridge_argv.extend(["--auth-cert-serial", str(auth_cert_serial)])
+                auth_cert_issuer = extra.get("auth_cert_issuer") or os.environ.get(
+                    "WHATSAPP_AUTH_CERT_ISSUER", "msg-router"
+                )
+                bridge_argv.extend(["--auth-cert-issuer", str(auth_cert_issuer)])
+
             self._bridge_process = subprocess.Popen(
-                [
-                    "node",
-                    str(bridge_path),
-                    "--port", str(self._bridge_port),
-                    "--session", str(self._session_path),
-                    "--mode", whatsapp_mode,
-                ],
+                bridge_argv,
                 stdout=bridge_log_fh,
                 stderr=bridge_log_fh,
                 preexec_fn=None if _IS_WINDOWS else os.setsid,
