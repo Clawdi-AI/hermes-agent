@@ -601,6 +601,13 @@ class DiscordAdapter(BasePlatformAdapter):
             )
             intents.voice_states = True
 
+            # Optional reverse-proxy override (msg-router, etc.). Must run
+            # BEFORE ``commands.Bot(...)`` because discord.py reads the
+            # class-level ``Route.BASE`` / ``DEFAULT_GATEWAY`` at construction
+            # time. A no-op when neither key is set.
+            from gateway.platforms.discord_patches import maybe_apply_from_config
+            maybe_apply_from_config(self.config.extra or {})
+
             # Resolve proxy (DISCORD_PROXY > generic env vars > macOS system proxy)
             from gateway.platforms.base import resolve_proxy_url, proxy_kwargs_for_bot
             proxy_url = resolve_proxy_url(platform_env_var="DISCORD_PROXY")
