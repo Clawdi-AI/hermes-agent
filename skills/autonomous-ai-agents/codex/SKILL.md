@@ -33,8 +33,12 @@ Requires the codex CLI and a git repository.
 - Use `pty=true` in terminal calls — Codex is an interactive terminal app
 
 For Hermes itself, `model.provider: openai-codex` uses Hermes-managed Codex
-OAuth from `~/.hermes/auth.json` after `hermes auth add openai-codex`. For the
-standalone Codex CLI, a valid CLI OAuth session may live under
+OAuth from `~/.hermes/auth.json` after `hermes auth add openai-codex`. Hermes'
+Codex app-server runtime also supports named custom providers when they declare
+`transport: codex_responses` or legacy `api_mode: codex_responses`; do not use
+`transport: codex_app_server` in the provider entry. Plain custom
+chat-completions providers are intentionally left on the default runtime.
+For the standalone Codex CLI, a valid CLI OAuth session may live under
 `~/.codex/auth.json`; do not treat a missing `OPENAI_API_KEY` alone as proof
 that Codex auth is missing.
 

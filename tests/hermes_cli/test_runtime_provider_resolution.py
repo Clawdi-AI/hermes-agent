@@ -792,6 +792,262 @@ def test_named_custom_provider_uses_providers_dict_when_list_missing(monkeypatch
     assert resolved["model"] == "gpt-5-mini"
 
 
+def test_named_custom_codex_responses_runtime_uses_codex_app_server(monkeypatch):
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.delenv("HERMES_INFERENCE_PROVIDER", raising=False)
+    monkeypatch.setattr(
+        rp,
+        "load_config",
+        lambda: {
+            "model": {
+                "provider": "custom:codex-proxy",
+                "default": "gpt-5.5",
+                "openai_runtime": "codex_app_server",
+            },
+            "providers": {
+                "codex-proxy": {
+                    "api": "http://127.0.0.1:4141/v1",
+                    "api_key": "proxy-key",
+                    "default_model": "gpt-5.5",
+                    "name": "codex-proxy",
+                    "transport": "codex_responses",
+                }
+            },
+        },
+    )
+    monkeypatch.setattr(rp, "_try_resolve_from_custom_pool", lambda *a, **k: None)
+    monkeypatch.setattr(
+        rp,
+        "resolve_provider",
+        lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError(
+                "resolve_provider should not be called for named custom providers"
+            )
+        ),
+    )
+
+    resolved = rp.resolve_runtime_provider(requested=None)
+
+    assert resolved["provider"] == "custom"
+    assert resolved["requested_provider"] == "custom:codex-proxy"
+    assert resolved["api_mode"] == "codex_app_server"
+    assert resolved["model"] == "gpt-5.5"
+
+
+def test_legacy_custom_codex_responses_runtime_uses_codex_app_server(monkeypatch):
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.setattr(
+        rp,
+        "load_config",
+        lambda: {
+            "model": {
+                "default": "gpt-5.5",
+                "openai_runtime": "codex_app_server",
+            },
+            "custom_providers": [
+                {
+                    "name": "legacy-codex-proxy",
+                    "base_url": "http://127.0.0.1:4242/v1",
+                    "api_key": "legacy-key",
+                    "api_mode": "codex_responses",
+                    "model": "gpt-5.5",
+                }
+            ],
+        },
+    )
+    monkeypatch.setattr(rp, "_try_resolve_from_custom_pool", lambda *a, **k: None)
+
+    resolved = rp.resolve_runtime_provider(requested="custom:legacy-codex-proxy")
+
+    assert resolved["provider"] == "custom"
+    assert resolved["requested_provider"] == "custom:legacy-codex-proxy"
+    assert resolved["api_mode"] == "codex_app_server"
+    assert resolved["model"] == "gpt-5.5"
+
+
+def test_pooled_custom_codex_responses_runtime_uses_codex_app_server(monkeypatch):
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.setattr(
+        rp,
+        "load_config",
+        lambda: {
+            "model": {
+                "default": "gpt-5.5",
+                "openai_runtime": "codex_app_server",
+            },
+            "providers": {
+                "pooled-codex-proxy": {
+                    "api": "http://127.0.0.1:4343/v1",
+                    "api_key": "seed-key",
+                    "default_model": "gpt-5.5",
+                    "name": "pooled-codex-proxy",
+                    "transport": "codex_responses",
+                }
+            },
+        },
+    )
+    monkeypatch.setattr(
+        rp,
+        "_try_resolve_from_custom_pool",
+        lambda *a, **k: {
+            "provider": "custom",
+            "api_mode": "codex_responses",
+            "base_url": "http://127.0.0.1:4343/v1",
+            "api_key": "pool-key",
+            "source": "pool:pooled-codex-proxy",
+        },
+    )
+
+    resolved = rp.resolve_runtime_provider(requested="custom:pooled-codex-proxy")
+
+    assert resolved["provider"] == "custom"
+    assert resolved["api_mode"] == "codex_app_server"
+    assert resolved["api_key"] == "pool-key"
+    assert resolved["model"] == "gpt-5.5"
+
+
+def test_named_custom_chat_runtime_does_not_use_codex_app_server(monkeypatch):
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.setattr(
+        rp,
+        "load_config",
+        lambda: {
+            "model": {
+                "default": "local-model",
+                "openai_runtime": "codex_app_server",
+            },
+            "providers": {
+                "chat-proxy": {
+                    "api": "http://127.0.0.1:4444/v1",
+                    "api_key": "chat-key",
+                    "default_model": "local-model",
+                    "name": "chat-proxy",
+                    "transport": "chat_completions",
+                }
+            },
+        },
+    )
+    monkeypatch.setattr(rp, "_try_resolve_from_custom_pool", lambda *a, **k: None)
+
+    resolved = rp.resolve_runtime_provider(requested="custom:chat-proxy")
+
+    assert resolved["provider"] == "custom"
+    assert resolved["api_mode"] == "chat_completions"
+
+
+def test_bare_custom_codex_responses_runtime_uses_codex_app_server(monkeypatch):
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.delenv("OPENROUTER_BASE_URL", raising=False)
+    monkeypatch.delenv("CUSTOM_BASE_URL", raising=False)
+    monkeypatch.setattr(
+        rp,
+        "load_config",
+        lambda: {
+            "model": {
+                "provider": "custom",
+                "base_url": "http://127.0.0.1:4545/v1",
+                "api_key": "bare-key",
+                "api_mode": "codex_responses",
+                "openai_runtime": "codex_app_server",
+            },
+        },
+    )
+    monkeypatch.setattr(rp, "_try_resolve_from_custom_pool", lambda *a, **k: None)
+
+    resolved = rp.resolve_runtime_provider(requested="custom")
+
+    assert resolved["provider"] == "custom"
+    assert resolved["api_mode"] == "codex_app_server"
+    assert resolved["base_url"] == "http://127.0.0.1:4545/v1"
+
+
+def test_explicit_base_url_custom_codex_responses_runtime_uses_codex_app_server(monkeypatch):
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.setattr(
+        rp,
+        "load_config",
+        lambda: {
+            "model": {
+                "provider": "custom",
+                "api_mode": "codex_responses",
+                "openai_runtime": "codex_app_server",
+            },
+        },
+    )
+    monkeypatch.setattr(rp, "_try_resolve_from_custom_pool", lambda *a, **k: None)
+
+    resolved = rp.resolve_runtime_provider(
+        requested="custom",
+        explicit_base_url="http://127.0.0.1:4646/v1",
+        explicit_api_key="explicit-key",
+    )
+
+    assert resolved["provider"] == "custom"
+    assert resolved["api_mode"] == "codex_app_server"
+    assert resolved["base_url"] == "http://127.0.0.1:4646/v1"
+
+
+def test_custom_codex_app_server_transport_does_not_bypass_codex_responses_gate(monkeypatch):
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.setattr(
+        rp,
+        "load_config",
+        lambda: {
+            "model": {
+                "openai_runtime": "codex_app_server",
+            },
+            "providers": {
+                "runtime-not-transport": {
+                    "api": "http://127.0.0.1:4747/v1",
+                    "api_key": "proxy-key",
+                    "default_model": "gpt-5.5",
+                    "name": "runtime-not-transport",
+                    "transport": "codex_app_server",
+                }
+            },
+        },
+    )
+    monkeypatch.setattr(rp, "_try_resolve_from_custom_pool", lambda *a, **k: None)
+
+    resolved = rp.resolve_runtime_provider(requested="custom:runtime-not-transport")
+
+    assert resolved["provider"] == "custom"
+    assert resolved["api_mode"] == "chat_completions"
+
+
+def test_bare_custom_codex_app_server_api_mode_does_not_bypass_codex_responses_gate(monkeypatch):
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.delenv("OPENROUTER_BASE_URL", raising=False)
+    monkeypatch.delenv("CUSTOM_BASE_URL", raising=False)
+    monkeypatch.setattr(
+        rp,
+        "load_config",
+        lambda: {
+            "model": {
+                "provider": "custom",
+                "base_url": "http://127.0.0.1:4848/v1",
+                "api_key": "bare-key",
+                "api_mode": "codex_app_server",
+                "openai_runtime": "codex_app_server",
+            },
+        },
+    )
+    monkeypatch.setattr(rp, "_try_resolve_from_custom_pool", lambda *a, **k: None)
+
+    resolved = rp.resolve_runtime_provider(requested="custom")
+
+    assert resolved["provider"] == "custom"
+    assert resolved["api_mode"] == "chat_completions"
+
+
 def test_named_custom_provider_uses_key_env_from_providers_dict(monkeypatch):
     """providers dict entries with key_env should resolve API key from env var."""
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
