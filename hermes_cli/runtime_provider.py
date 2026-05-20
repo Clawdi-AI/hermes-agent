@@ -260,6 +260,19 @@ def _parse_api_mode(raw: Any) -> Optional[str]:
     return None
 
 
+def _parse_transport_api_mode(raw: Any) -> Optional[str]:
+    """Validate a provider transport value.
+
+    ``codex_app_server`` is a runtime host, not an endpoint transport. Custom
+    providers must resolve to ``codex_responses`` first, then opt into the
+    app-server via ``model.openai_runtime``.
+    """
+    mode = _parse_api_mode(raw)
+    if mode == "codex_app_server":
+        return None
+    return mode
+
+
 def _maybe_apply_codex_app_server_runtime(
     *,
     provider: str,
@@ -267,18 +280,25 @@ def _maybe_apply_codex_app_server_runtime(
     model_cfg: Optional[Dict[str, Any]],
 ) -> str:
     """Optional opt-in: rewrite api_mode → "codex_app_server" for OpenAI/Codex
-    providers when the user has explicitly enabled that runtime via
-    `model.openai_runtime: codex_app_server` in config.yaml.
+    providers, or a custom Codex Responses proxy, when the user has explicitly
+    enabled that runtime via `model.openai_runtime: codex_app_server` in
+    config.yaml.
 
     Default behavior is preserved: when the key is unset, "auto", or empty,
-    this function is a no-op. Only providers in {"openai", "openai-codex"}
-    are eligible — other providers (anthropic, openrouter, etc.) cannot be
-    rerouted through codex.
+    this function is a no-op. Only providers in {"openai", "openai-codex"} and
+    custom providers that already resolved to ``codex_responses`` are eligible
+    — other providers (anthropic, openrouter, custom chat proxies, etc.) cannot
+    be rerouted through codex.
 
     Returns the (possibly-rewritten) api_mode."""
     if not model_cfg:
         return api_mode
-    if provider not in {"openai", "openai-codex"}:
+    provider_norm = (provider or "").strip().lower()
+    api_mode_norm = (api_mode or "").strip().lower()
+    eligible_provider = provider_norm in {"openai", "openai-codex"} or (
+        provider_norm == "custom" and api_mode_norm == "codex_responses"
+    )
+    if not eligible_provider:
         return api_mode
     runtime = str(model_cfg.get("openai_runtime") or "").strip().lower()
     if runtime == "codex_app_server":
@@ -538,7 +558,7 @@ def _get_named_custom_provider(requested_provider: str) -> Optional[Dict[str, An
                     # already does, so without this lift every migrated config
                     # silently downgrades codex_responses / anthropic_messages
                     # providers to chat_completions in the resolved runtime.
-                    api_mode = _parse_api_mode(entry.get("api_mode") or entry.get("transport"))
+                    api_mode = _parse_transport_api_mode(entry.get("api_mode") or entry.get("transport"))
                     if api_mode:
                         result["api_mode"] = api_mode
                     return result
@@ -559,7 +579,7 @@ def _get_named_custom_provider(requested_provider: str) -> Optional[Dict[str, An
                         extra_body = entry.get("extra_body")
                         if isinstance(extra_body, dict):
                             result["extra_body"] = dict(extra_body)
-                        api_mode = _parse_api_mode(entry.get("api_mode") or entry.get("transport"))
+                        api_mode = _parse_transport_api_mode(entry.get("api_mode") or entry.get("transport"))
                         if api_mode:
                             result["api_mode"] = api_mode
                         return result
@@ -605,7 +625,7 @@ def _get_named_custom_provider(requested_provider: str) -> Optional[Dict[str, An
         extra_body = entry.get("extra_body")
         if isinstance(extra_body, dict):
             result["extra_body"] = dict(extra_body)
-        api_mode = _parse_api_mode(entry.get("api_mode"))
+        api_mode = _parse_transport_api_mode(entry.get("api_mode"))
         if api_mode:
             result["api_mode"] = api_mode
         model_name = str(entry.get("model", "") or "").strip()
@@ -648,10 +668,12 @@ def _resolve_named_custom_runtime(
             pass
     if requested_norm == "custom" and explicit_base_url:
         base_url = explicit_base_url.strip().rstrip("/")
+        model_cfg = _get_model_config()
+        configured_mode = _parse_transport_api_mode(model_cfg.get("api_mode"))
         # Check credential pool first — mirrors the named-custom-provider path
         # so bare `provider: custom` with a configured custom_providers entry
         # also gets its api_key from the pool instead of env var fallbacks.
-        pool_result = _try_resolve_from_custom_pool(base_url, "custom", None)
+        pool_result = _try_resolve_from_custom_pool(base_url, "custom", configured_mode)
         if pool_result:
             pool_result["source"] = "direct-alias"
             return pool_result
@@ -673,7 +695,9 @@ def _resolve_named_custom_runtime(
         ) or "no-key-required"
         return {
             "provider": "custom",
-            "api_mode": _detect_api_mode_for_url(base_url) or "chat_completions",
+            "api_mode": configured_mode
+            or _detect_api_mode_for_url(base_url)
+            or "chat_completions",
             "base_url": base_url,
             "api_key": api_key,
             "source": "direct-alias",
@@ -861,8 +885,9 @@ def _resolve_openrouter_runtime(
     if effective_provider == "custom" and base_url:
         # Pass requested_provider so pool lookup prefers name match over base_url,
         # fixing credential mix-ups when multiple custom providers share a base_url.
+        configured_mode = _parse_transport_api_mode(model_cfg.get("api_mode"))
         pool_result = _try_resolve_from_custom_pool(
-            base_url, effective_provider, _parse_api_mode(model_cfg.get("api_mode")),
+            base_url, effective_provider, configured_mode,
             provider_name=requested_provider if requested_norm != "custom" else None,
         )
         if pool_result:
@@ -873,7 +898,11 @@ def _resolve_openrouter_runtime(
 
     return {
         "provider": effective_provider,
-        "api_mode": _parse_api_mode(model_cfg.get("api_mode"))
+        "api_mode": (
+            _parse_transport_api_mode(model_cfg.get("api_mode"))
+            if effective_provider == "custom"
+            else _parse_api_mode(model_cfg.get("api_mode"))
+        )
         or _detect_api_mode_for_url(base_url)
         or "chat_completions",
         "base_url": base_url,
@@ -1257,6 +1286,11 @@ def resolve_runtime_provider(
         explicit_base_url=explicit_base_url,
     )
     if custom_runtime:
+        custom_runtime["api_mode"] = _maybe_apply_codex_app_server_runtime(
+            provider=str(custom_runtime.get("provider") or ""),
+            api_mode=str(custom_runtime.get("api_mode") or "chat_completions"),
+            model_cfg=_get_model_config(),
+        )
         custom_runtime["requested_provider"] = requested_provider
         return custom_runtime
 
@@ -1657,6 +1691,11 @@ def resolve_runtime_provider(
         requested_provider=requested_provider,
         explicit_api_key=explicit_api_key,
         explicit_base_url=explicit_base_url,
+    )
+    runtime["api_mode"] = _maybe_apply_codex_app_server_runtime(
+        provider=str(runtime.get("provider") or ""),
+        api_mode=str(runtime.get("api_mode") or "chat_completions"),
+        model_cfg=model_cfg,
     )
     runtime["requested_provider"] = requested_provider
     return runtime
