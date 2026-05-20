@@ -2,6 +2,8 @@
 
 import os
 import json
+import subprocess
+import sys
 import tempfile
 from pathlib import Path
 from unittest.mock import patch, MagicMock
@@ -218,6 +220,28 @@ class TestWebServerEndpoints:
         # Should contain known env var names
         assert any(k.endswith("_API_KEY") or k.endswith("_TOKEN") for k in data.keys())
 
+    def test_get_env_vars_exposes_non_secret_values_only(self):
+        from hermes_cli.config import save_env_value
+
+        save_env_value("TELEGRAM_ALLOWED_USERS", "123,456")
+        save_env_value("FEISHU_ALLOWED_USERS", "ou_a,ou_b")
+        save_env_value("OPENROUTER_API_KEY", "sk-test-secret")
+
+        resp = self.client.get("/api/env")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["TELEGRAM_ALLOWED_USERS"]["value"] == "123,456"
+        assert data["TELEGRAM_ALLOWED_USERS"]["is_password"] is False
+        assert data["FEISHU_ALLOWED_USERS"]["value"] == "ou_a,ou_b"
+        assert data["FEISHU_ALLOWED_USERS"]["is_password"] is False
+        assert data["OPENROUTER_API_KEY"]["value"] is None
+        assert data["OPENROUTER_API_KEY"]["is_password"] is True
+
+    def test_feishu_allowed_users_is_registered_for_dashboard_env(self):
+        assert "FEISHU_ALLOWED_USERS" in OPTIONAL_ENV_VARS
+        assert OPTIONAL_ENV_VARS["FEISHU_ALLOWED_USERS"]["password"] is False
+
     def test_reveal_env_var(self, tmp_path):
         """POST /api/env/reveal should return the real unredacted value."""
         from hermes_cli.config import save_env_value
@@ -344,6 +368,37 @@ class TestWebServerEndpoints:
         assert resp.status_code in {200, 404}
         if resp.status_code == 200:
             assert "FastAPI" not in resp.text  # Should not serve the actual source
+
+
+def test_web_server_loads_session_token_from_user_dotenv(tmp_path):
+    hermes_home = tmp_path / "hermes"
+    hermes_home.mkdir()
+    (hermes_home / ".env").write_text(
+        "HERMES_SESSION_TOKEN=stable-dashboard-token\n",
+        encoding="utf-8",
+    )
+
+    env = os.environ.copy()
+    env["HERMES_HOME"] = str(hermes_home)
+    env.pop("HERMES_SESSION_TOKEN", None)
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import hermes_cli.web_server as ws; "
+                "assert ws._SESSION_TOKEN == 'stable-dashboard-token'; "
+                "print(ws._SESSION_TOKEN)"
+            ),
+        ],
+        cwd=str(Path(__file__).resolve().parents[2]),
+        env=env,
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+
+    assert result.stdout.strip() == "stable-dashboard-token"
 
 
 # ---------------------------------------------------------------------------
