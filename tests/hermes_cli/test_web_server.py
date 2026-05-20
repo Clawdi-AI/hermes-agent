@@ -3,6 +3,9 @@
 import os
 import json
 import shutil
+import subprocess
+import sys
+import tempfile
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
@@ -182,21 +185,32 @@ class TestRedactKey:
 
 
 class TestSessionTokenInjection:
-    """The desktop shell mints HERMES_DASHBOARD_SESSION_TOKEN and signs its
-    /api + /api/ws calls with it. The backend must adopt that token, else every
-    desktop request 401s ("gateway is offline"). A main-merge once silently
-    dropped this read — this guards the contract, not a literal value.
-    """
+    """Injected session tokens must be adopted instead of randomised."""
 
-    def test_honors_injected_token(self, monkeypatch):
+    def test_honors_dashboard_injected_token(self, monkeypatch):
         import importlib
         import hermes_cli.web_server as ws
 
         monkeypatch.setenv("HERMES_DASHBOARD_SESSION_TOKEN", "desktop-seeded-token")
+        monkeypatch.delenv("HERMES_SESSION_TOKEN", raising=False)
         try:
             importlib.reload(ws)
             assert ws._SESSION_TOKEN == "desktop-seeded-token"
         finally:
+            monkeypatch.delenv("HERMES_DASHBOARD_SESSION_TOKEN", raising=False)
+            importlib.reload(ws)
+
+    def test_honors_reverse_proxy_session_token(self, monkeypatch):
+        import importlib
+        import hermes_cli.web_server as ws
+
+        monkeypatch.setenv("HERMES_SESSION_TOKEN", "stable-dashboard-token")
+        monkeypatch.setenv("HERMES_DASHBOARD_SESSION_TOKEN", "desktop-seeded-token")
+        try:
+            importlib.reload(ws)
+            assert ws._SESSION_TOKEN == "stable-dashboard-token"
+        finally:
+            monkeypatch.delenv("HERMES_SESSION_TOKEN", raising=False)
             monkeypatch.delenv("HERMES_DASHBOARD_SESSION_TOKEN", raising=False)
             importlib.reload(ws)
 
@@ -205,6 +219,7 @@ class TestSessionTokenInjection:
         import hermes_cli.web_server as ws
 
         monkeypatch.delenv("HERMES_DASHBOARD_SESSION_TOKEN", raising=False)
+        monkeypatch.delenv("HERMES_SESSION_TOKEN", raising=False)
         importlib.reload(ws)
 
         assert ws._SESSION_TOKEN and len(ws._SESSION_TOKEN) >= 32
@@ -706,6 +721,28 @@ class TestWebServerEndpoints:
         # Should contain known env var names
         assert any(k.endswith("_API_KEY") or k.endswith("_TOKEN") for k in data.keys())
 
+    def test_get_env_vars_exposes_non_secret_values_only(self):
+        from hermes_cli.config import save_env_value
+
+        save_env_value("TELEGRAM_ALLOWED_USERS", "123,456")
+        save_env_value("FEISHU_ALLOWED_USERS", "ou_a,ou_b")
+        save_env_value("OPENROUTER_API_KEY", "sk-test-secret")
+
+        resp = self.client.get("/api/env")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["TELEGRAM_ALLOWED_USERS"]["value"] == "123,456"
+        assert data["TELEGRAM_ALLOWED_USERS"]["is_password"] is False
+        assert data["FEISHU_ALLOWED_USERS"]["value"] == "ou_a,ou_b"
+        assert data["FEISHU_ALLOWED_USERS"]["is_password"] is False
+        assert data["OPENROUTER_API_KEY"]["value"] is None
+        assert data["OPENROUTER_API_KEY"]["is_password"] is True
+
+    def test_feishu_allowed_users_is_registered_for_dashboard_env(self):
+        assert "FEISHU_ALLOWED_USERS" in OPTIONAL_ENV_VARS
+        assert OPTIONAL_ENV_VARS["FEISHU_ALLOWED_USERS"]["password"] is False
+
     def test_reveal_env_var(self, tmp_path):
         """POST /api/env/reveal should return the real unredacted value."""
         from hermes_cli.config import save_env_value
@@ -1041,6 +1078,37 @@ class TestWebServerEndpoints:
         data = resp.json()
         assert data["model"] == ""
         assert data["free_tier"] is None
+
+
+def test_web_server_loads_session_token_from_user_dotenv(tmp_path):
+    hermes_home = tmp_path / "hermes"
+    hermes_home.mkdir()
+    (hermes_home / ".env").write_text(
+        "HERMES_SESSION_TOKEN=stable-dashboard-token\n",
+        encoding="utf-8",
+    )
+
+    env = os.environ.copy()
+    env["HERMES_HOME"] = str(hermes_home)
+    env.pop("HERMES_SESSION_TOKEN", None)
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import hermes_cli.web_server as ws; "
+                "assert ws._SESSION_TOKEN == 'stable-dashboard-token'; "
+                "print(ws._SESSION_TOKEN)"
+            ),
+        ],
+        cwd=str(Path(__file__).resolve().parents[2]),
+        env=env,
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+
+    assert result.stdout.strip() == "stable-dashboard-token"
 
 
 # ---------------------------------------------------------------------------
@@ -3569,8 +3637,6 @@ class TestDashboardPluginStaticAssetAllowlist:
         # 403 traversal-blocked OR 404 (depending on URL decode order)
         # — never 200.
         assert resp.status_code in (403, 404)
-
-
 def _fake_httpx_client(*, status: int | None = None, raise_exc: bool = False):
     """Build a drop-in for httpx.Client whose .get() returns a canned status
     (or raises a transport error). Patched in for the credential-validate probe
@@ -3647,4 +3713,3 @@ class TestValidateProviderCredential:
     def test_empty_value_rejected(self):
         data = self._post("OPENAI_API_KEY", "   ").json()
         assert data["ok"] is False
-
