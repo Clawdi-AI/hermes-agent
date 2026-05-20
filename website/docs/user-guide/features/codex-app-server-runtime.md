@@ -5,7 +5,7 @@ sidebar_label: Codex App-Server Runtime
 
 # Codex App-Server Runtime
 
-Hermes can optionally hand `openai/*` and `openai-codex/*` turns to the [Codex CLI app-server](https://github.com/openai/codex) instead of running its own tool loop. When enabled, terminal commands, file edits, sandboxing, and MCP tool calls all execute inside Codex's runtime — Hermes becomes the shell around it (sessions DB, slash commands, gateway, memory and skill review).
+Hermes can optionally hand `openai/*`, `openai-codex/*`, and custom providers whose transport is `codex_responses` to the [Codex CLI app-server](https://github.com/openai/codex) instead of running its own tool loop. When enabled, terminal commands, file edits, sandboxing, and MCP tool calls all execute inside Codex's runtime — Hermes becomes the shell around it (sessions DB, slash commands, gateway, memory and skill review).
 
 This is **opt-in only**. Default Hermes behavior is unchanged unless you flip the flag. Hermes never auto-routes you onto this runtime.
 
@@ -130,7 +130,8 @@ The kanban tools are gated by `HERMES_KANBAN_TASK` env var the dispatcher sets �
 | Kanban worker dispatch | yes | yes (via callback) |
 | Kanban orchestrator tools | yes | yes (via callback) |
 | All gateway platforms | yes | yes |
-| Non-OpenAI providers | yes | n/a — OpenAI/Codex-scoped |
+| Custom Codex Responses proxy | yes | yes |
+| Other non-OpenAI providers | yes | n/a — OpenAI/Codex-scoped |
 
 ## Prerequisites
 
@@ -144,6 +145,8 @@ The kanban tools are gated by `HERMES_KANBAN_TASK` env var the dispatcher sets �
    codex login                  # writes tokens to ~/.codex/auth.json
    ```
    Hermes' own `hermes auth login codex` writes to `~/.hermes/auth.json` — that's a separate session. **Run `codex login` separately** if you haven't.
+
+   A named custom provider can use this runtime too, but only when it already declares the Codex Responses transport (`transport: codex_responses` or legacy `api_mode: codex_responses`). Do not set `transport: codex_app_server` on the provider entry — `codex_app_server` is selected through `model.openai_runtime`, not as an endpoint transport. Plain custom chat-completions endpoints stay on Hermes' default runtime.
 
 3. **(Optional) Install the Codex plugins you want.** When you enable the runtime, Hermes auto-migrates whichever curated plugins you've already installed via Codex CLI:
    ```bash

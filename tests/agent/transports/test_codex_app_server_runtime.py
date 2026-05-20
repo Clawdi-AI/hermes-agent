@@ -70,6 +70,22 @@ class TestMaybeApplyCodexAppServerRuntime:
         )
         assert got == "codex_app_server"
 
+    def test_opt_in_rewrites_custom_codex_responses_proxy(self) -> None:
+        got = _maybe_apply_codex_app_server_runtime(
+            provider="custom",
+            api_mode="codex_responses",
+            model_cfg={"openai_runtime": "codex_app_server"},
+        )
+        assert got == "codex_app_server"
+
+    def test_custom_chat_proxy_is_not_rerouted(self) -> None:
+        got = _maybe_apply_codex_app_server_runtime(
+            provider="custom",
+            api_mode="chat_completions",
+            model_cfg={"openai_runtime": "codex_app_server"},
+        )
+        assert got == "chat_completions"
+
     def test_case_insensitive(self) -> None:
         got = _maybe_apply_codex_app_server_runtime(
             provider="openai",
