@@ -1689,6 +1689,20 @@ class AIAgent:
                 child.interrupt(message)
             except Exception as e:
                 logger.debug("Failed to propagate interrupt to child agent: %s", e)
+        # Propagate interrupt to an active codex_app_server session.
+        # Without this, the codex subprocess keeps running its turn until
+        # the post-tool quiet watchdog (90s) or the outer deadline (600s)
+        # fires — effectively breaking /stop on the codex_app_server
+        # runtime. request_interrupt() is idempotent and a no-op when no
+        # turn is active. Tolerant of pre-AIAgent.__init__ test stubs.
+        _codex_session = getattr(self, "_codex_session", None)
+        if _codex_session is not None:
+            try:
+                _codex_session.request_interrupt()
+            except Exception as e:
+                logger.debug(
+                    "Failed to propagate interrupt to codex session: %s", e,
+                )
         if not self.quiet_mode:
             print("\n⚡ Interrupt requested" + (f": '{message[:40]}...'" if message and len(message) > 40 else f": '{message}'" if message else ""))
 

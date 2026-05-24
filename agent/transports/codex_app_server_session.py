@@ -451,6 +451,12 @@ class CodexAppServerSession:
             if self._interrupt_event.is_set():
                 self._issue_interrupt(result.turn_id)
                 result.interrupted = True
+                # Retire the session: codex may still be unwinding the
+                # interrupted turn when the next user message arrives,
+                # and a stale in-progress turn risks turn/start failures
+                # or duplicated work. Cleanest is to respawn fresh.
+                # Matches the post-tool-quiet and deadline paths below.
+                result.should_retire = True
                 break
 
             # Detect a dead subprocess between iterations. If codex exited
@@ -512,6 +518,11 @@ class CodexAppServerSession:
                         if _has_turn_aborted_marker(proj.final_text):
                             turn_complete = True
                             result.interrupted = True
+                            # `<turn_aborted>` means codex tore the turn
+                            # down outside the normal completion path; the
+                            # subprocess is in an uncertain state. Retire
+                            # so the next turn respawns cleanly.
+                            result.should_retire = True
                             result.error = (
                                 result.error
                                 or "codex reported turn_aborted"
@@ -567,6 +578,10 @@ class CodexAppServerSession:
                 if _has_turn_aborted_marker(projection.final_text):
                     turn_complete = True
                     result.interrupted = True
+                    # See drain-loop sibling above: turn_aborted indicates
+                    # codex tore down without the normal completion path;
+                    # retire so we don't ride a half-shut-down session.
+                    result.should_retire = True
                     result.error = (
                         result.error or "codex reported turn_aborted"
                     )
