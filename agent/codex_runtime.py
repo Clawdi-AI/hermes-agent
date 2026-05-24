@@ -42,12 +42,13 @@ def run_codex_app_server_turn(
     Returns the same dict shape as the chat_completions path.
     """
     from agent.transports.codex_app_server_session import CodexAppServerSession
+    from agent.transports.codex_event_display import build_event_display_callback
 
     # Lazy session: one CodexAppServerSession per AIAgent instance.
     # Spawned on first turn, reused across turns, closed at AIAgent
     # shutdown (see _cleanup hook).
     if not hasattr(agent, "_codex_session") or agent._codex_session is None:
-        cwd = getattr(agent, "session_cwd", None) or os.getcwd()
+        cwd = getattr(agent, "session_cwd", None) or os.environ.get("TERMINAL_CWD")
         # Approval callback: defer to Hermes' standard prompt flow if a
         # CLI thread has installed one. Gateway / cron contexts get the
         # codex-side fail-closed default.
@@ -59,6 +60,7 @@ def run_codex_app_server_turn(
         agent._codex_session = CodexAppServerSession(
             cwd=cwd,
             approval_callback=approval_callback,
+            on_event=build_event_display_callback(agent),
         )
 
     # NOTE: the user message is ALREADY appended to messages by the
