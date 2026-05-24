@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import os
 import queue
+import signal
 import subprocess
 import threading
 import time
@@ -114,6 +115,13 @@ class CodexAppServerClient:
         # Codex emits tracing to stderr; default WARN keeps it quiet for users.
         spawn_env.setdefault("RUST_LOG", "warn")
 
+        # ``start_new_session=True`` puts the codex subprocess in its own
+        # POSIX session/process group. ``/usr/local/bin/codex`` is a node
+        # wrapper that re-execs the native ``codex`` binary as a child;
+        # without a dedicated group, ``terminate()``/``kill()`` only signal
+        # the wrapper and the native child survives as an orphan still
+        # holding the rollout sqlite. With a group we can ``os.killpg()``
+        # the whole tree on close. POSIX-only — Windows ignores the flag.
         self._proc = subprocess.Popen(
             cmd,
             stdin=subprocess.PIPE,
@@ -121,6 +129,7 @@ class CodexAppServerClient:
             stderr=subprocess.PIPE,
             bufsize=0,
             env=spawn_env,
+            start_new_session=True,
         )
         self._next_id = 1
         self._pending: dict[int, _Pending] = {}
@@ -165,7 +174,15 @@ class CodexAppServerClient:
         return result
 
     def close(self, timeout: float = 3.0) -> None:
-        """Close stdin and wait for the subprocess to exit, escalating to kill."""
+        """Close stdin and wait for the subprocess to exit, escalating to kill.
+
+        Signals are delivered to the whole process group (set up via
+        ``start_new_session=True`` at spawn) so the native ``codex`` binary
+        re-execed by the ``/usr/local/bin/codex`` node wrapper exits along
+        with the wrapper. Without that, every retired session leaks a
+        native-binary orphan that keeps the rollout sqlite locked and
+        wedges the next ``initialize`` handshake.
+        """
         if self._closed:
             return
         self._closed = True
@@ -174,12 +191,41 @@ class CodexAppServerClient:
                 self._proc.stdin.close()
         except Exception:
             pass
+        # POSIX: signal the process group. Windows: fall back to signalling
+        # the immediate child only — Popen(..., start_new_session=True) is
+        # a no-op there, but neither is the orphan problem (codex on
+        # Windows is a single .exe, no wrapper).
+        pgid: Optional[int] = None
         try:
-            self._proc.terminate()
+            pgid = os.getpgid(self._proc.pid)
+        except (OSError, AttributeError):
+            pgid = None
+
+        def _signal(sig: int) -> None:
+            if pgid is not None:
+                try:
+                    os.killpg(pgid, sig)
+                    return
+                except (ProcessLookupError, PermissionError):
+                    pass
+                except AttributeError:
+                    pass
+            try:
+                # Map SIGTERM/SIGKILL onto the high-level Popen methods so
+                # this path keeps working on platforms without killpg.
+                if sig == signal.SIGTERM:
+                    self._proc.terminate()
+                else:
+                    self._proc.kill()
+            except Exception:
+                pass
+
+        try:
+            _signal(signal.SIGTERM)
             self._proc.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
             try:
-                self._proc.kill()
+                _signal(signal.SIGKILL)
                 self._proc.wait(timeout=1.0)
             except Exception:
                 pass
