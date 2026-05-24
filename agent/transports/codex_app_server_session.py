@@ -500,6 +500,19 @@ class CodexAppServerSession:
                     pending = self._client.take_notification(timeout=0)
                     if pending is None:
                         break
+                    # Surface notifications through the display hook so
+                    # tool-progress bubbles / spinner lines still fire
+                    # while we block on an approval prompt — without this
+                    # the user sees a silent gap whenever codex stops to
+                    # ask for permission.
+                    if self._on_event is not None:
+                        try:
+                            self._on_event(pending)
+                        except Exception:  # pragma: no cover - display
+                            logger.debug(
+                                "on_event callback raised in approval drain",
+                                exc_info=True,
+                            )
                     self._track_pending_file_change(pending)
                     proj = projector.project(pending)
                     if proj.messages:
