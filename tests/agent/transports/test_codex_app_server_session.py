@@ -930,6 +930,57 @@ class TestSessionRetirement:
         # Stderr-derived auth hint takes precedence over generic message
         assert r.error and "codex login" in r.error
 
+    def test_user_interrupt_marks_session_for_retirement(self):
+        """When AIAgent.interrupt() trips ``_interrupt_event``, the
+        session must retire so the next user turn respawns codex
+        cleanly. Previously this path left ``should_retire=False`` and
+        we'd reuse the subprocess while codex was still unwinding the
+        interrupted turn — risking turn/start failures or duplicated
+        work for the next message."""
+        client = FakeClient()
+        client.queue_notification(
+            "item/completed",
+            item={
+                "type": "commandExecution", "id": "x",
+                "command": "sleep 60", "cwd": "/", "status": "inProgress",
+                "aggregatedOutput": None, "exitCode": None,
+                "commandActions": [],
+            },
+            threadId="t", turnId="tu1",
+        )
+        s = make_session(client)
+        s.ensure_started()
+        s.request_interrupt()
+        r = s.run_turn("loop forever", turn_timeout=2.0)
+        assert r.interrupted is True
+        assert r.should_retire is True, (
+            "User-initiated interrupt must retire the session, matching "
+            "the post-tool-quiet and deadline paths"
+        )
+
+    def test_turn_aborted_marker_marks_session_for_retirement(self):
+        """``<turn_aborted>`` means codex tore down outside the normal
+        completion path — the subprocess state is uncertain, so the
+        next turn should respawn rather than ride a half-shutdown one."""
+        client = FakeClient()
+        client.queue_notification(
+            "item/completed",
+            item={
+                "type": "agentMessage", "id": "m1",
+                "text": "partial output... <turn_aborted>",
+            },
+            threadId="t", turnId="tu1",
+        )
+        s = make_session(client)
+        r = s.run_turn(
+            "abort mid-turn", turn_timeout=2.0,
+            notification_poll_timeout=0.01,
+        )
+        assert r.interrupted is True
+        assert r.should_retire is True, (
+            "turn_aborted marker must retire the session"
+        )
+
 
 # ---- thread/start cross-fill ----
 
