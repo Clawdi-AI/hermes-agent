@@ -932,32 +932,70 @@ class TestSessionRetirement:
         # Stderr-derived auth hint takes precedence over generic message
         assert r.error and "codex login" in r.error
 
-    def test_user_interrupt_marks_session_for_retirement(self):
-        """When AIAgent.interrupt() trips ``_interrupt_event``, the
-        session must retire so the next user turn respawns codex
-        cleanly. Previously this path left ``should_retire=False`` and
-        we'd reuse the subprocess while codex was still unwinding the
-        interrupted turn — risking turn/start failures or duplicated
-        work for the next message."""
+    def test_user_interrupt_does_not_retire_session(self):
+        """User-initiated interrupt must **not** retire the session.
+
+        ``turn/interrupt`` is codex's documented API for cancelling a
+        turn cleanly; after we ask codex to stop, the thread is ready
+        to accept the next turn. Retiring would tear down the codex
+        subprocess *and* its in-memory thread, forcing the next user
+        message to spawn a fresh thread with zero history — the
+        "context gets messed up after /stop" regression that PR #9
+        accidentally introduced and this PR reverts.
+
+        The post-tool quiet, deadline, and turn-aborted paths still
+        retire because in those cases the subprocess itself is wedged
+        (see their respective tests above).
+
+        Note: ``run_turn`` calls ``_interrupt_event.clear()`` at the
+        top, so an interrupt set *before* ``run_turn`` is wiped out
+        and the deadline path is hit instead — that's how the
+        original PR #9 test was actually being satisfied. This test
+        fires the interrupt *during* the loop via a hook so the
+        intended branch is exercised.
+        """
         client = FakeClient()
-        client.queue_notification(
-            "item/completed",
-            item={
-                "type": "commandExecution", "id": "x",
-                "command": "sleep 60", "cwd": "/", "status": "inProgress",
-                "aggregatedOutput": None, "exitCode": None,
-                "commandActions": [],
-            },
-            threadId="t", turnId="tu1",
-        )
+        # Queue a few benign notifications so the loop has work to do
+        # while we wait for the hook to fire the interrupt.
+        for i in range(3):
+            client.queue_notification(
+                "item/completed",
+                item={
+                    "type": "agentMessage", "id": f"m{i}",
+                    "text": "still working...",
+                },
+                threadId="t", turnId="tu1",
+            )
+
         s = make_session(client)
         s.ensure_started()
-        s.request_interrupt()
-        r = s.run_turn("loop forever", turn_timeout=2.0)
+
+        # Hook: the first time the loop pulls a notification, fire the
+        # interrupt as a side-effect. By the next iteration the loop's
+        # `if self._interrupt_event.is_set()` branch sees it.
+        original_take = client.take_notification
+        fired = {"value": False}
+
+        def take_hook(timeout=0):
+            n = original_take(timeout=timeout)
+            if not fired["value"] and n is not None:
+                fired["value"] = True
+                s._interrupt_event.set()
+            return n
+
+        client.take_notification = take_hook
+
+        r = s.run_turn("loop forever", turn_timeout=5.0,
+                       notification_poll_timeout=0.01)
         assert r.interrupted is True
-        assert r.should_retire is True, (
-            "User-initiated interrupt must retire the session, matching "
-            "the post-tool-quiet and deadline paths"
+        assert r.should_retire is False, (
+            "User-initiated interrupt must NOT retire the session — codex's "
+            "turn/interrupt cleanly stops the active turn while keeping the "
+            "thread alive for the next user message."
+        )
+        # And we should still have actually sent turn/interrupt to codex.
+        assert any(
+            method == "turn/interrupt" for (method, _) in client.requests
         )
 
     def test_turn_aborted_marker_marks_session_for_retirement(self):
