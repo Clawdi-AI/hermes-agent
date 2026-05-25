@@ -451,12 +451,19 @@ class CodexAppServerSession:
             if self._interrupt_event.is_set():
                 self._issue_interrupt(result.turn_id)
                 result.interrupted = True
-                # Retire the session: codex may still be unwinding the
-                # interrupted turn when the next user message arrives,
-                # and a stale in-progress turn risks turn/start failures
-                # or duplicated work. Cleanest is to respawn fresh.
-                # Matches the post-tool-quiet and deadline paths below.
-                result.should_retire = True
+                # Do NOT retire the session here. ``turn/interrupt`` is
+                # codex's documented API for cancelling a turn cleanly —
+                # once we've asked codex to stop, the thread is ready to
+                # accept the next turn. Retiring tears down the codex
+                # subprocess **and the thread** (the in-memory thread
+                # only lives in this subprocess), so the next turn would
+                # spawn a fresh thread with zero conversation history —
+                # which is the regression introduced in the original
+                # PR #9 wiring and reported as "context gets messed up
+                # after /stop". The other interrupt-out paths
+                # (post-tool quiet watchdog, deadline timeout, turn
+                # aborted marker) still set should_retire because in
+                # those cases the subprocess itself is genuinely wedged.
                 break
 
             # Detect a dead subprocess between iterations. If codex exited
