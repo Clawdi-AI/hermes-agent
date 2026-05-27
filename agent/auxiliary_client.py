@@ -115,6 +115,32 @@ def _safe_isinstance(obj: Any, maybe_type: Any) -> bool:
         return False
 
 
+def _is_openai_sdk_none_output_parse_error(exc: BaseException) -> bool:
+    """Detect OpenAI SDK parser failures on Codex terminal output=null."""
+    return isinstance(exc, TypeError) and "'NoneType' object is not iterable" in str(exc)
+
+
+def _codex_aux_output_from_stream_parts(
+    output_items: List[Any],
+    text_deltas: List[str],
+    *,
+    has_function_calls: bool,
+) -> tuple[List[Any], Optional[str]]:
+    if output_items:
+        return list(output_items), None
+    if text_deltas and not has_function_calls:
+        assembled = "".join(text_deltas)
+        return [
+            SimpleNamespace(
+                type="message",
+                role="assistant",
+                status="completed",
+                content=[SimpleNamespace(type="output_text", text=assembled)],
+            )
+        ], assembled
+    return [], None
+
+
 def _extract_url_query_params(url: str):
     """Extract query params from URL, return (clean_url, default_query dict or None)."""
     parsed = urlparse(url)
@@ -796,26 +822,46 @@ class _CodexCompletionsAdapter:
                 timeout_timer.daemon = True
                 timeout_timer.start()
             _check_cancelled()
-            with self._client.responses.stream(**resp_kwargs) as stream:
-                for _event in stream:
+            try:
+                with self._client.responses.stream(**resp_kwargs) as stream:
+                    for _event in stream:
+                        _check_cancelled()
+                        _etype = getattr(_event, "type", "")
+                        if _etype == "response.output_item.done":
+                            _done = getattr(_event, "item", None)
+                            if _done is not None:
+                                collected_output_items.append(_done)
+                        elif "output_text.delta" in _etype:
+                            _delta = getattr(_event, "delta", "")
+                            if _delta:
+                                collected_text_deltas.append(_delta)
+                        elif "function_call" in _etype:
+                            has_function_calls = True
                     _check_cancelled()
-                    _etype = getattr(_event, "type", "")
-                    if _etype == "response.output_item.done":
-                        _done = getattr(_event, "item", None)
-                        if _done is not None:
-                            collected_output_items.append(_done)
-                    elif "output_text.delta" in _etype:
-                        _delta = getattr(_event, "delta", "")
-                        if _delta:
-                            collected_text_deltas.append(_delta)
-                    elif "function_call" in _etype:
-                        has_function_calls = True
-                _check_cancelled()
-                final = stream.get_final_response()
+                    final = stream.get_final_response()
+            except TypeError as exc:
+                if timed_out.is_set() or not _is_openai_sdk_none_output_parse_error(exc):
+                    raise
+                recovered_output, assembled_text = _codex_aux_output_from_stream_parts(
+                    collected_output_items,
+                    collected_text_deltas,
+                    has_function_calls=has_function_calls,
+                )
+                if not recovered_output:
+                    raise
+                final = SimpleNamespace(
+                    output=recovered_output,
+                    output_text=assembled_text,
+                    usage=None,
+                )
+                logger.warning(
+                    "Codex auxiliary SDK parser rejected terminal response.output; "
+                    "returning output collected from stream events",
+                )
 
             # Backfill empty output from collected stream events
             _output = getattr(final, "output", None)
-            if isinstance(_output, list) and not _output:
+            if _output is None or (isinstance(_output, list) and not _output):
                 if collected_output_items:
                     final.output = list(collected_output_items)
                     logger.debug(
@@ -845,7 +891,7 @@ class _CodexCompletionsAdapter:
                     val = obj.get(key, default)
                 return val if val is not None else default
 
-            for item in getattr(final, "output", []):
+            for item in getattr(final, "output", []) or []:
                 item_type = _item_get(item, "type")
                 if item_type == "message":
                     for part in (_item_get(item, "content") or []):
