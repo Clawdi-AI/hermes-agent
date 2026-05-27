@@ -174,6 +174,31 @@ class _FakeResponsesStream:
         return self._final_response
 
 
+class _ParserCrashResponsesStream:
+    def __init__(self, events, error=None):
+        self._events = list(events)
+        self._error = error or TypeError("'NoneType' object is not iterable")
+        self.closed = False
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.closed = True
+        return False
+
+    def __iter__(self):
+        for event in self._events:
+            yield event
+        raise self._error
+
+    def get_final_response(self):
+        raise AssertionError("SDK parser crash should skip get_final_response")
+
+    def close(self):
+        self.closed = True
+
+
 class _FakeCreateStream:
     def __init__(self, events):
         self._events = list(events)
@@ -479,6 +504,81 @@ def test_run_codex_stream_fallback_parses_create_stream_events(monkeypatch):
     assert calls["create"] == 1
     assert create_stream.closed is True
     assert response.output[0].content[0].text == "streamed create ok"
+
+
+def test_run_codex_stream_recovers_from_sdk_none_output_parser_error(monkeypatch):
+    agent = _build_agent(monkeypatch)
+    output_item = _codex_message_response("stream recovered").output[0]
+    parser_crash_stream = _ParserCrashResponsesStream(
+        [
+            SimpleNamespace(type="response.output_text.delta", delta="stream recovered"),
+            SimpleNamespace(type="response.output_item.done", item=output_item),
+        ]
+    )
+    calls = {"stream": 0, "create": 0}
+
+    def _fake_stream(**kwargs):
+        calls["stream"] += 1
+        return parser_crash_stream
+
+    def _fake_create(**kwargs):
+        calls["create"] += 1
+        return _codex_message_response("should not retry")
+
+    agent.client = SimpleNamespace(
+        responses=SimpleNamespace(
+            stream=_fake_stream,
+            create=_fake_create,
+        )
+    )
+
+    response = agent._run_codex_stream(_codex_request_kwargs())
+    assert calls == {"stream": 1, "create": 0}
+    assert parser_crash_stream.closed is True
+    assert response.status == "completed"
+    assert response.output[0].content[0].text == "stream recovered"
+
+
+def test_run_codex_create_stream_fallback_recovers_from_sdk_none_output_parser_error(monkeypatch):
+    agent = _build_agent(monkeypatch)
+    output_item = _codex_message_response("fallback recovered").output[0]
+    parser_crash_stream = _ParserCrashResponsesStream(
+        [
+            SimpleNamespace(type="response.output_text.delta", delta="fallback recovered"),
+            SimpleNamespace(type="response.output_item.done", item=output_item),
+        ]
+    )
+
+    def _fake_create(**kwargs):
+        assert kwargs.get("stream") is True
+        return parser_crash_stream
+
+    agent.client = SimpleNamespace(
+        responses=SimpleNamespace(
+            create=_fake_create,
+        )
+    )
+
+    response = agent._run_codex_create_stream_fallback(_codex_request_kwargs())
+    assert parser_crash_stream.closed is True
+    assert response.status == "completed"
+    assert response.output[0].content[0].text == "fallback recovered"
+
+
+def test_run_codex_stream_unrelated_typeerror_still_raises(monkeypatch):
+    agent = _build_agent(monkeypatch)
+
+    agent.client = SimpleNamespace(
+        responses=SimpleNamespace(
+            stream=lambda **kwargs: _ParserCrashResponsesStream(
+                [], error=TypeError("different parser failure")
+            ),
+            create=lambda **kwargs: _codex_message_response("should not fallback"),
+        )
+    )
+
+    with pytest.raises(TypeError, match="different parser failure"):
+        agent._run_codex_stream(_codex_request_kwargs())
 
 
 def test_run_conversation_codex_plain_text(monkeypatch):
