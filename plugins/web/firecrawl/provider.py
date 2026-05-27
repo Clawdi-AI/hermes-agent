@@ -48,12 +48,17 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+from types import MethodType
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
+from urllib.parse import urlparse, urlunparse
 
 from agent.web_search_provider import WebSearchProvider
 from tools.website_policy import check_website_access
 
 logger = logging.getLogger(__name__)
+
+_CLAWDI_FIRECRAWL_PROXY_SUFFIX = "/proxy/firecrawl"
+_CLAWDI_FIRECRAWL_URL_PATCH_FLAG = "_hermes_preserve_firecrawl_proxy_base_path"
 
 
 # ---------------------------------------------------------------------------
@@ -134,6 +139,73 @@ def _get_direct_firecrawl_config() -> Optional[tuple]:
         kwargs["api_url"] = api_url
 
     return kwargs, ("direct", api_url or None, api_key or None)
+
+
+def _with_firecrawl_proxy_prefix(base_path: str, endpoint_path: str) -> str:
+    """Return endpoint_path under base_path without double-prefixing."""
+    prefix = "/" + base_path.strip("/")
+    suffix = "/" + endpoint_path.lstrip("/")
+    if suffix == prefix or suffix.startswith(f"{prefix}/"):
+        return suffix
+    if suffix == "/":
+        return prefix
+    return f"{prefix}{suffix}"
+
+
+def _patch_firecrawl_proxy_base_path(client: Any) -> None:
+    """Preserve Clawdi's path-mounted Firecrawl proxy in firecrawl-py v2 URLs."""
+    v2_client = getattr(client, "_v2_client", None) or getattr(client, "v2", None)
+    http_client = getattr(v2_client, "http_client", None)
+    if http_client is None:
+        return
+
+    api_url = getattr(http_client, "api_url", "")
+    if not isinstance(api_url, str) or not api_url.strip():
+        return
+
+    base = urlparse(api_url.rstrip("/"))
+    base_path = base.path.rstrip("/")
+    if not base_path.endswith(_CLAWDI_FIRECRAWL_PROXY_SUFFIX):
+        return
+
+    if getattr(http_client, _CLAWDI_FIRECRAWL_URL_PATCH_FLAG, False):
+        return
+
+    original_build_url = getattr(http_client, "_build_url", None)
+    if not callable(original_build_url):
+        return
+
+    def _build_url_preserving_proxy_path(self: Any, endpoint: str) -> str:
+        if not isinstance(endpoint, str):
+            return original_build_url(endpoint)
+
+        current_api_url = getattr(self, "api_url", api_url)
+        current_base = urlparse(current_api_url.rstrip("/"))
+        current_base_path = current_base.path.rstrip("/")
+        if not current_base_path.endswith(_CLAWDI_FIRECRAWL_PROXY_SUFFIX):
+            return original_build_url(endpoint)
+
+        parsed_endpoint = urlparse(endpoint)
+        if parsed_endpoint.netloc or endpoint.startswith("/"):
+            path = _with_firecrawl_proxy_prefix(
+                current_base_path,
+                parsed_endpoint.path or "/",
+            )
+            return urlunparse(
+                (
+                    current_base.scheme or "https",
+                    current_base.netloc,
+                    path,
+                    "",
+                    parsed_endpoint.query,
+                    "",
+                )
+            )
+
+        return original_build_url(endpoint)
+
+    http_client._build_url = MethodType(_build_url_preserving_proxy_path, http_client)
+    setattr(http_client, _CLAWDI_FIRECRAWL_URL_PATCH_FLAG, True)
 
 
 def _get_firecrawl_gateway_url() -> str:
@@ -258,6 +330,7 @@ def _get_firecrawl_client() -> Any:
     # Construct via the re-exported Firecrawl proxy on tools.web_tools so
     # unit tests patching ``tools.web_tools.Firecrawl`` see their mock.
     _wt._firecrawl_client = _wt.Firecrawl(**kwargs)
+    _patch_firecrawl_proxy_base_path(_wt._firecrawl_client)
     _wt._firecrawl_client_config = client_config
     return _wt._firecrawl_client
 

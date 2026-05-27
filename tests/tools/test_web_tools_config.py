@@ -14,6 +14,7 @@ import os
 import sys
 import types
 import pytest
+from urllib.parse import urljoin
 from unittest.mock import patch, MagicMock, AsyncMock
 
 
@@ -239,6 +240,72 @@ class TestFirecrawlClientConfig:
                     from tools.web_tools import _get_firecrawl_client
                     with pytest.raises(ValueError):
                         _get_firecrawl_client()
+
+    def test_clawdi_proxy_url_preserves_base_path_for_sdk_slash_endpoints(self):
+        """Clawdi's path-mounted proxy must survive firecrawl-py's /v2 endpoints."""
+        from plugins.web.firecrawl.provider import _patch_firecrawl_proxy_base_path
+
+        class FakeHttpClient:
+            def __init__(self):
+                self.api_url = "https://api.clawdi.ai/proxy/firecrawl"
+
+            def _build_url(self, endpoint):
+                base = self.api_url if self.api_url.endswith("/") else f"{self.api_url}/"
+                return urljoin(base, endpoint)
+
+        class FakeV2Client:
+            def __init__(self):
+                self.http_client = FakeHttpClient()
+
+        class FakeFirecrawlClient:
+            def __init__(self):
+                self._v2_client = FakeV2Client()
+
+        client = FakeFirecrawlClient()
+        http_client = client._v2_client.http_client
+
+        assert http_client._build_url("/v2/search") == "https://api.clawdi.ai/v2/search"
+
+        _patch_firecrawl_proxy_base_path(client)
+
+        assert (
+            http_client._build_url("/v2/search")
+            == "https://api.clawdi.ai/proxy/firecrawl/v2/search"
+        )
+        assert (
+            http_client._build_url("v2/search")
+            == "https://api.clawdi.ai/proxy/firecrawl/v2/search"
+        )
+        assert (
+            http_client._build_url("https://api.firecrawl.dev/v2/extract/job-123")
+            == "https://api.clawdi.ai/proxy/firecrawl/v2/extract/job-123"
+        )
+        assert (
+            http_client._build_url("/proxy/firecrawl/v2/search")
+            == "https://api.clawdi.ai/proxy/firecrawl/v2/search"
+        )
+
+    def test_firecrawl_proxy_path_patch_is_scoped_to_clawdi_proxy_urls(self):
+        """Root Firecrawl origins keep the SDK's normal URL behavior."""
+        from plugins.web.firecrawl.provider import _patch_firecrawl_proxy_base_path
+
+        class FakeHttpClient:
+            api_url = "https://api.firecrawl.dev"
+
+            def _build_url(self, endpoint):
+                base = self.api_url if self.api_url.endswith("/") else f"{self.api_url}/"
+                return urljoin(base, endpoint)
+
+        class FakeFirecrawlClient:
+            _v2_client = types.SimpleNamespace(http_client=FakeHttpClient())
+
+        client = FakeFirecrawlClient()
+        _patch_firecrawl_proxy_base_path(client)
+
+        assert (
+            client._v2_client.http_client._build_url("/v2/search")
+            == "https://api.firecrawl.dev/v2/search"
+        )
 
 
 class TestBackendSelection:
