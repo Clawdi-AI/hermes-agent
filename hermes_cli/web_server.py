@@ -74,20 +74,6 @@ from utils import env_var_enabled
 # checkouts see the same precedence order in both launch paths.
 load_hermes_dotenv(project_env=PROJECT_ROOT / ".env")
 
-# Load `~/.hermes/.env` into ``os.environ`` before any module-level reads
-# of ``HERMES_SESSION_TOKEN`` (or any other secret used by this module).
-#
-# The `hermes` CLI entry point already does this in ``hermes_cli/main.py``,
-# but the standalone uvicorn launcher (``uvicorn hermes_cli.web_server:app``)
-# bypasses ``main.py`` and so never gets a chance to load the dotenv file.
-# Without this call, reverse-proxied deployments that store
-# ``HERMES_SESSION_TOKEN`` in ``~/.hermes/.env`` would silently fall back
-# to the random token and break cross-origin auth on every restart.
-#
-# The ``project_env`` argument mirrors the CLI's call site so development
-# checkouts see the same precedence order in both launch paths.
-load_hermes_dotenv(project_env=PROJECT_ROOT / ".env")
-
 try:
     from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
     from fastapi.middleware.cors import CORSMiddleware
